@@ -121,12 +121,16 @@ PROCEED_CHECKOUT = (
 
 DELIVER_TO_THIS_ADDRESS = (
     (AppiumBy.ACCESSIBILITY_ID, "Deliver to this address"),
+    (AppiumBy.ACCESSIBILITY_ID, "Use this address"),
     (
         AppiumBy.IOS_PREDICATE,
         'type == "XCUIElementTypeButton" AND '
         '(label == "Deliver to this address" OR '
         'name == "Deliver to this address" OR '
-        'label CONTAINS[c] "Deliver to this address")',
+        'label CONTAINS[c] "Deliver to this address" OR '
+        'label == "Use this address" OR '
+        'name == "Use this address" OR '
+        'label CONTAINS[c] "Use this address")',
     ),
 )
 
@@ -448,10 +452,12 @@ def _tap_second_address_radio(driver, markers: MarkerLog, outcome: dict) -> None
 
 
 def _tap_deliver_to_this_address(driver, markers: MarkerLog, outcome: dict) -> None:
-    print('Step: tap "Deliver to this address" …')
+    print('Step: tap "Deliver to this address" / "Use this address" …')
     hit = _scroll_find_tap(driver, DELIVER_TO_THIS_ADDRESS, scrolls=3)
     if not hit:
-        raise AssertionError('"Deliver to this address" button not found')
+        raise AssertionError(
+            '"Deliver to this address" / "Use this address" button not found'
+        )
     by, value = hit
     outcome.setdefault("selectors", {})["deliver_to_this_address"] = {
         "by": by,

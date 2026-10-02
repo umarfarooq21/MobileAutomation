@@ -32,6 +32,14 @@ python -m grocery_latency run --retailer amazon --scenario test_case_1 --dry-run
 python -m grocery_latency run --retailer amazon --scenario test_case_1
 python -m grocery_latency run --retailer amazon --scenario test_case_2 --dry-run
 python -m grocery_latency run --retailer amazon --scenario test_case_2
+python -m grocery_latency run --retailer amazon --scenario test_case_3 --dry-run
+python -m grocery_latency run --retailer amazon --scenario test_case_3
+python -m grocery_latency run --retailer amazon --scenario test_case_4 --dry-run
+python -m grocery_latency run --retailer amazon --scenario test_case_4
+python -m grocery_latency run --retailer amazon --scenario test_case_5 --dry-run
+python -m grocery_latency run --retailer amazon --scenario test_case_5
+python -m grocery_latency run --retailer amazon --scenario test_case_6 --dry-run
+python -m grocery_latency run --retailer amazon --scenario test_case_6
 python -m grocery_latency run --retailer amazon --scenario task1_add_grocery_to_cart --dry-run
 python -m grocery_latency run --retailer amazon --scenario task1_add_grocery_to_cart
 python -m grocery_latency run --retailer amazon --scenario task1_cart_checkout_cancel --dry-run
@@ -41,14 +49,26 @@ python -m grocery_latency run --retailer amazon --scenario task1_cart_checkout_c
 **Test Case 1** (`test_case_1`): Groceries → Shop groceries → tap **+** → Cart → **start recording** → Proceed to checkout → 2nd address radio → **Deliver to this address** → stop at **1 minute**.  
 (`select_grocery_under_4` is kept as an alias for the same flow.)
 
-**Test Case 2** (`test_case_2` / TASK 2): Groceries → Shop groceries → add **5 different** items **under $5** → Cart → verify all 5 added. No place-order / no recording.
+**Test Case 2** (`test_case_2` / TASK 2): Groceries → add **5** items → Cart → **start recording** → verify. No place-order.
+
+**Test Case 3** (`test_case_3` / TASK 3): Grocery → Household → add **5** items → Cart → record → payment 2nd card → address 2nd → Deliver. No place-order.
+
+**Test Case 4** (`test_case_4` / TASK 4): Grocery search **under 5 dollar** → real +×5 → Cart → record → Proceed → change delivery-slot radio → **Change payment method** → select alternate card → Continue → stop. No place-order.
+
+**Test Case 5** (`test_case_5` / TASK 5): Grocery → **Produce** → +×5 → Cart → record → Proceed → No thanks → Change payment (2nd card) → Continue → Change delivery address (2nd) → Deliver. Fallback search **vegetables and fruits** if Produce is empty. No place-order.
+
+**Test Case 6** (`test_case_6` / TASK 6): Same as TC5, plus on Place Your Order tap **See more delivery slots** and select the **last** slot, then payment + address edits. No place-order.
 
 | Scenario | What it does |
 | --- | --- |
 | `open_only` | Launch retailer app only (smoke / login assist pause) |
 | `search_groceries` | Amazon: open app → tap search → type `Groceries` (no order) |
 | `test_case_1` | **Test Case 1**: Groceries → + → Cart → record → checkout → 2nd address → Deliver → Place Order qty **+3** → stop |
-| `test_case_2` | **Test Case 2 / TASK 2**: Groceries → add **5** under-**$5** items → Cart verify |
+| `test_case_2` | **Test Case 2 / TASK 2**: Groceries → add **5** under-**$5** items → Cart → **record** → verify |
+| `test_case_3` | **Test Case 3 / TASK 3**: Grocery → Household → +×5 → cart record → payment + address edits |
+| `test_case_4` | **Test Case 4 / TASK 4**: Grocery search → +×5 → cart record → delivery slot + Change payment method → stop |
+| `test_case_5` | **Test Case 5 / TASK 5**: Grocery → Produce → +×5 → cart record → payment + address edits |
+| `test_case_6` | **Test Case 6 / TASK 6**: TC5 + See more delivery slots → last slot → payment + address |
 | `task1_add_grocery_to_cart` | Amazon TASK 1: cold start → open master ASIN PDP → add to cart |
 | `task1_cart_checkout_cancel` | TASK 1 (ASIN) + Cart → **start recording** → checkout → place order → Path A cancel |
 

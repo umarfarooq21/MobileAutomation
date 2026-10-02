@@ -61,7 +61,11 @@ def repair_mp4_mdat_size(path: Path) -> bool:
 
 
 def transcode_to_h264(src: Path, dest: Path) -> bool:
-    """Remux/transcode to H.264 + yuv420p for QuickTime / VS Code playback."""
+    """Remux/transcode to H.264 + yuv420p for QuickTime / VS Code playback.
+
+    Appium iOS MJPEG often has broken PTS/DTS (pts/dts pair unsupported). Force
+    constant FPS and regenerate timestamps so libx264 can mux cleanly.
+    """
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return False
@@ -71,8 +75,12 @@ def transcode_to_h264(src: Path, dest: Path) -> bool:
         "-hide_banner",
         "-loglevel",
         "error",
+        "-fflags",
+        "+genpts+igndts",
         "-i",
         str(src),
+        "-vf",
+        "fps=10,scale=720:-2,format=yuv420p",
         "-c:v",
         "libx264",
         "-pix_fmt",
@@ -81,6 +89,10 @@ def transcode_to_h264(src: Path, dest: Path) -> bool:
         "veryfast",
         "-crf",
         "23",
+        "-fps_mode",
+        "cfr",
+        "-r",
+        "10",
         "-movflags",
         "+faststart",
         str(dest),
@@ -129,13 +141,37 @@ def save_recording_bytes(video_b64: str, dest: Path) -> Path:
 
 
 def start_ios_screen_recording(driver, *, time_limit: int = 60) -> None:
-    """Start recording. Prefer MJPEG on real devices (libx264 often lacks moov)."""
+    """Start recording. Prefer low-FPS MJPEG so wall-clock duration is preserved.
+
+    High FPS on a busy real device drops frames and Appium encodes assuming a
+    fixed rate, which truncates videos (e.g. 3 min of UI → 13–35 s file).
+    """
     attempts = (
-        # Default / MJPEG: Appium finalizes a moov we can repair + transcode.
+        # Low FPS + realtime PTS so duration matches elapsed wall time.
+        {
+            "timeLimit": time_limit,
+            "forceRestart": True,
+            "videoType": "mjpeg",
+            "videoFps": 10,
+            "videoFilters": "setpts=(RTCTIME-RTCSTART)/(TB*1000000)",
+            "videoScale": "720:-2",
+        },
+        {
+            "timeLimit": time_limit,
+            "forceRestart": True,
+            "videoType": "mpeg4",
+            "videoQuality": "medium",
+            "videoFps": 10,
+            "videoScale": "720:-2",
+        },
+        {
+            "timeLimit": time_limit,
+            "forceRestart": True,
+            "videoType": "mjpeg",
+            "videoFps": 10,
+        },
         {"timeLimit": time_limit, "forceRestart": True, "videoType": "mjpeg"},
         {"timeLimit": time_limit, "forceRestart": True},
-        {"timeLimit": time_limit, "forceRestart": True, "videoType": "mpeg4"},
-        {"timeLimit": time_limit, "forceRestart": True, "videoType": "libx264"},
     )
     last_exc: Exception | None = None
     for opts in attempts:

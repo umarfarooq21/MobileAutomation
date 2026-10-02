@@ -31,6 +31,7 @@ DEFAULT_MASTER_ASINS = (
 )
 
 ADD_TO_CART_BUTTON = (
+    (AppiumBy.ACCESSIBILITY_ID, "Add To Cart"),
     (AppiumBy.ACCESSIBILITY_ID, "Add to cart"),
     (AppiumBy.ACCESSIBILITY_ID, "Add to Cart"),
     (AppiumBy.ACCESSIBILITY_ID, "Add to Basket"),
@@ -38,7 +39,8 @@ ADD_TO_CART_BUTTON = (
     (
         AppiumBy.IOS_PREDICATE,
         'type == "XCUIElementTypeButton" AND '
-        '(name == "Add to cart" OR label == "Add to cart" OR '
+        '(name == "Add To Cart" OR label == "Add To Cart" OR '
+        'name == "Add to cart" OR label == "Add to cart" OR '
         'name == "Add to Cart" OR label == "Add to Cart" OR '
         'label CONTAINS[c] "Add to Basket" OR '
         'label CONTAINS[c] "Add to cart" OR name CONTAINS[c] "Add to cart" OR '
@@ -697,6 +699,272 @@ def add_master_asin_to_cart(
     raise AssertionError(
         f"Could not add any master-list ASIN to cart. Tried={list(asins)} errors={errors}"
     )
+
+
+def _badge_increased(driver, before: int | None, *, timeout: float = 3.0) -> tuple[bool, int | None]:
+    """Poll cart badge for an increase — no Cart-page open (fast for multi-add)."""
+    end = time.monotonic() + timeout
+    after = None
+    while time.monotonic() < end:
+        after = cart_badge_count(driver)
+        if before is not None and after is not None and after > before:
+            return True, after
+        if before is None and after is not None and after > 0:
+            return True, after
+        time.sleep(0.25)
+    after = cart_badge_count(driver)
+    ok = (
+        (before is not None and after is not None and after > before)
+        or (before is None and after is not None and after > 0)
+    )
+    return ok, after
+
+
+# Fast Add locators — prefer Amazon iOS "Add To Cart" (TC1-proven casing).
+_FAST_ADD_BUTTON = (
+    (AppiumBy.ACCESSIBILITY_ID, "Add To Cart"),
+    (AppiumBy.ACCESSIBILITY_ID, "Add to cart"),
+    (AppiumBy.ACCESSIBILITY_ID, "Add to Cart"),
+    (AppiumBy.ACCESSIBILITY_ID, "Add to Basket"),
+    (
+        AppiumBy.IOS_PREDICATE,
+        'type == "XCUIElementTypeButton" AND visible == 1 AND '
+        '(label == "Add To Cart" OR name == "Add To Cart" OR '
+        'label == "Add to cart" OR name == "Add to cart" OR '
+        'label == "Add to Cart" OR name == "Add to Cart" OR '
+        'label CONTAINS[c] "Add to Basket" OR '
+        'label CONTAINS[c] "Add to cart" OR name CONTAINS[c] "Add to cart")',
+    ),
+    (
+        AppiumBy.IOS_PREDICATE,
+        'type == "XCUIElementTypeButton" AND visible == 1 AND '
+        '(name == "+" OR label == "+" OR label CONTAINS[c] "Increase quantity")',
+    ),
+)
+
+
+def _search_for_asin(driver, asin: str, markers: MarkerLog) -> None:
+    """Type exact ASIN into Amazon search and submit (stays in-app, no deep link)."""
+    print(f"Search ASIN {asin} …")
+    search_el, tap_by, tap_value = find_first(
+        driver, SEARCH_TAP_STRATEGIES, timeout=10.0
+    )
+    search_el.click()
+    time.sleep(0.4)
+    type_el, type_by, type_value = find_first(
+        driver, SEARCH_TYPE_STRATEGIES, timeout=8.0
+    )
+    type_into_search(driver, type_el, asin)
+    markers.mark(
+        "asin_search",
+        asin=asin,
+        search_tap=tap_value,
+        search_type=type_value,
+        by_tap=tap_by,
+        by_type=type_by,
+    )
+    time.sleep(0.5)
+    try:
+        submit, _, _ = find_first(
+            driver,
+            (
+                (AppiumBy.ACCESSIBILITY_ID, asin),
+                (
+                    AppiumBy.IOS_PREDICATE,
+                    f'name == "{asin}" OR label == "{asin}" OR '
+                    'label == "Search" OR name == "Search"',
+                ),
+            ),
+            timeout=4.0,
+        )
+        submit.click()
+    except TimeoutError:
+        try:
+            driver.execute_script("mobile: keys", {"keys": ["\n"]})
+        except Exception:  # noqa: BLE001
+            pass
+    time.sleep(1.6)
+    tap_dismissibles(driver)
+
+
+def _fast_tap_add(driver, markers: MarkerLog, outcome: dict, *, scrolls: int = 3) -> bool:
+    """Tap Add with short find_first timeouts — no is_displayed fan-out."""
+    before = cart_badge_count(driver)
+    outcome["cart_count_before"] = before
+    for scroll_i in range(scrolls):
+        try:
+            el, by, value = find_first(driver, _FAST_ADD_BUTTON, timeout=1.8)
+            print(f"Fast Add: {by} = {value!r}")
+            outcome.setdefault("selectors", {})["add_to_cart"] = {
+                "by": by,
+                "value": value,
+            }
+            el.click()
+            markers.mark("add_to_cart_tapped", by=by, value=value, path="fast")
+            time.sleep(1.4)
+            tap_dismissibles(driver)
+            confirmed = looks_added(driver, before)
+            after = cart_badge_count(driver)
+            outcome["cart_count_after"] = after
+            outcome["add_confirmed_in_ui"] = confirmed
+            outcome["item_added_to_cart"] = True
+            return True
+        except TimeoutError:
+            if scroll_i + 1 < scrolls:
+                scroll_down(driver)
+                markers.mark("pdp_scrolled_for_add", index=scroll_i, path="fast")
+                time.sleep(0.35)
+    return False
+
+
+def _open_first_serp_result(driver, markers: MarkerLog) -> bool:
+    """Tap first product-ish cell/link on ASIN search results."""
+    try:
+        results = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'visible == 1 AND ('
+            'type == "XCUIElementTypeLink" OR type == "XCUIElementTypeCell" OR '
+            'type == "XCUIElementTypeButton")',
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    for el in results[:16]:
+        try:
+            blob = element_textish(el).lower()
+            if not blob or len(blob) < 8:
+                continue
+            skip = (
+                "search",
+                "camera",
+                "cart",
+                "filter",
+                "sort",
+                "back",
+                "home",
+                "rufus",
+                "add to cart",
+            )
+            if any(s in blob for s in skip):
+                continue
+            el.click()
+            markers.mark("serp_result_opened", snippet=blob[:80])
+            time.sleep(1.8)
+            tap_dismissibles(driver)
+            return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+def add_n_asins_to_cart(
+    driver,
+    bundle_id: str,
+    asins: list[str] | tuple[str, ...],
+    markers: MarkerLog,
+    outcome: dict,
+    *,
+    target: int,
+) -> list[dict]:
+    """Add up to `target` ASINs via in-app search → SERP/PDP Add (badge confirm).
+
+    Skips deep-link + cart-add URL fallbacks — those were multi-minute per ASIN
+    and slower than the grocery carousel path.
+    """
+    del bundle_id  # kept for call-site compatibility
+    if not asins:
+        raise AssertionError("ASIN list is empty")
+    if target < 1:
+        raise AssertionError("target must be >= 1")
+
+    clean = [(a or "").strip().upper() for a in asins if (a or "").strip()]
+    outcome["master_asins"] = list(clean)
+    outcome["asin_add_target"] = target
+    outcome["asin_add_strategy"] = "search_serp_pdp"
+    added: list[dict] = []
+    errors: list[dict] = []
+    start_badge = cart_badge_count(driver)
+    outcome["cart_count_before_adds"] = start_badge
+    markers.mark("asin_multi_add_start", target=target, badge=start_badge)
+
+    for asin in clean:
+        if len(added) >= target:
+            break
+        print(f"Step: add ASIN {asin} ({len(added) + 1}/{target}) …")
+        markers.mark("asin_attempt", asin=asin, index=len(added) + 1)
+        before = cart_badge_count(driver)
+        t0 = time.monotonic()
+        try:
+            _search_for_asin(driver, asin, markers)
+            add_path = "serp"
+            tapped = _fast_tap_add(driver, markers, outcome, scrolls=2)
+            if not tapped:
+                # Open PDP from first result, then Add.
+                if _open_first_serp_result(driver, markers):
+                    add_path = "pdp"
+                    tapped = _fast_tap_add(driver, markers, outcome, scrolls=4)
+            if not tapped:
+                errors.append({"asin": asin, "error": "no add control found"})
+                markers.mark("asin_add_failed", asin=asin, reason="no_add_button")
+                print(f"  skip ASIN {asin}: no Add ({time.monotonic() - t0:.1f}s)")
+                continue
+
+            ok, after = _badge_increased(driver, before, timeout=3.0)
+            if not ok and outcome.get("add_confirmed_in_ui"):
+                ok, after = True, cart_badge_count(driver)
+            if not ok:
+                errors.append({"asin": asin, "error": "badge did not increase"})
+                markers.mark("asin_add_failed", asin=asin, reason="no_badge_increase")
+                print(f"  skip ASIN {asin}: badge {before}→{after}")
+                continue
+
+            entry = {
+                "index": len(added) + 1,
+                "asin": asin,
+                "source": "asin_list",
+                "open_method": f"search:{asin}",
+                "add_path": add_path,
+                "confirmed": True,
+                "cart_before": before,
+                "cart_after": after,
+                "elapsed_s": round(time.monotonic() - t0, 1),
+            }
+            added.append(entry)
+            markers.mark(
+                "item_added_to_cart",
+                index=entry["index"],
+                asin=asin,
+                confirmed=True,
+                cart_before=before,
+                cart_after=after,
+                path=add_path,
+            )
+            print(
+                f"  added #{entry['index']}/{target} ASIN {asin} "
+                f"via {add_path} badge {before}→{after} ({entry['elapsed_s']}s)"
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"asin": asin, "error": str(exc)})
+            markers.mark("asin_attempt_error", asin=asin, error=str(exc))
+            print(f"ASIN {asin} failed: {exc}")
+
+    outcome["items_added"] = list(added)
+    outcome["items_added_count"] = len(added)
+    outcome["asin_errors"] = errors
+    end_badge = cart_badge_count(driver)
+    outcome["cart_count_after_adds"] = end_badge
+    markers.mark(
+        "asin_multi_add_done",
+        added=len(added),
+        target=target,
+        badge_before=start_badge,
+        badge_after=end_badge,
+    )
+    if len(added) < target:
+        raise AssertionError(
+            f"Only added {len(added)}/{target} ASINs. "
+            f"Tried={clean} errors={errors}"
+        )
+    return added
 
 
 def open_cart_page(driver, markers: MarkerLog, outcome: dict) -> None:

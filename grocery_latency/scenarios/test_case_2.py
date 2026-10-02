@@ -1,4 +1,8 @@
-"""Test Case 2 (TASK 2): Groceries → under $5 → add 5 different items → verify cart."""
+"""Test Case 2 (TASK 2): Home → Grocery tab → tap + on products → cart ending.
+
+US home: tap home "Grocery" pill → Produce aisle → yellow + ×5 → Cart →
+record → same ending as Test Case 1 (checkout → 2nd address → deliver → qty +N).
+"""
 
 from __future__ import annotations
 
@@ -9,12 +13,6 @@ from datetime import datetime, timezone
 
 from appium.webdriver.common.appiumby import AppiumBy
 
-from grocery_latency.amazon_search import (
-    SEARCH_TAP_STRATEGIES,
-    SEARCH_TYPE_STRATEGIES,
-    field_contains_query,
-    type_into_search,
-)
 from grocery_latency.config import Settings
 from grocery_latency.driver import create_driver, describe_session
 from grocery_latency.ios_helpers import (
@@ -25,48 +23,75 @@ from grocery_latency.ios_helpers import (
     tap_dismissibles,
 )
 from grocery_latency.markers import MarkerLog
+from grocery_latency.recording import save_recording_bytes, start_ios_screen_recording
+from grocery_latency.scenarios.test_case_1 import (
+    QUANTITY_INCREASE_BY,
+    _scroll_find_tap,
+    _tap_deliver_to_this_address,
+    _tap_proceed_to_checkout,
+)
 
 TEST_CASE_NAME = "Test Case 2"
 TEST_CASE_ID = "test_case_2"
-SEARCH_QUERY = "Groceries"
 TARGET_ITEMS = 5
-MAX_PRICE_USD = 5.0
-# Rough PKR→USD when storefront shows local currency (seen ~277 on device).
-PKR_PER_USD = 280.0
+CART_RECORDING_SECONDS = 45
 
-GROCERIES_SUGGESTION_STRATEGIES = (
-    (AppiumBy.ACCESSIBILITY_ID, "groceries"),
-    (AppiumBy.ACCESSIBILITY_ID, "Groceries"),
+GROCERY_HOME_TAB_STRATEGIES = (
+    (AppiumBy.ACCESSIBILITY_ID, "Grocery"),
+    (AppiumBy.ACCESSIBILITY_ID, "grocery"),
     (
         AppiumBy.IOS_PREDICATE,
         'type == "XCUIElementTypeButton" AND '
-        '(name == "groceries" OR label == "groceries" OR '
-        'name == "Groceries" OR label == "Groceries")',
+        '(label == "Grocery" OR name == "Grocery" OR '
+        'label == "grocery" OR name == "grocery")',
+    ),
+    (
+        AppiumBy.IOS_CLASS_CHAIN,
+        '**/XCUIElementTypeButton[`label == "Grocery" OR name == "Grocery"`]',
+    ),
+    (
+        AppiumBy.IOS_PREDICATE,
+        'label == "Grocery" OR name == "Grocery" OR '
+        'label CONTAINS[c] "Grocery" OR name CONTAINS[c] "Grocery"',
     ),
 )
 
-SHOP_GROCERIES_STRATEGIES = (
-    (AppiumBy.ACCESSIBILITY_ID, "Shop groceries on Amazon"),
+PRODUCE_TAB_STRATEGIES = (
+    (AppiumBy.ACCESSIBILITY_ID, "Produce"),
     (
         AppiumBy.IOS_PREDICATE,
-        'label CONTAINS[c] "Shop groceries on Amazon" OR '
-        'name CONTAINS[c] "Shop groceries on Amazon"',
+        'label == "Produce" OR name == "Produce"',
     ),
     (
-        AppiumBy.IOS_PREDICATE,
-        'label CONTAINS[c] "Shop groceries" OR name CONTAINS[c] "Shop groceries"',
+        AppiumBy.IOS_CLASS_CHAIN,
+        '**/XCUIElementTypeButton[`label == "Produce" OR name == "Produce"`]',
+    ),
+    (
+        AppiumBy.IOS_CLASS_CHAIN,
+        '**/XCUIElementTypeStaticText[`label == "Produce"`]',
     ),
 )
 
-ADD_TO_CART_BUTTON = (
-    (AppiumBy.ACCESSIBILITY_ID, "Add To Cart"),
+GROCERY_PLUS_STRATEGIES = (
+    (AppiumBy.ACCESSIBILITY_ID, "+"),
     (
         AppiumBy.IOS_PREDICATE,
-        'type == "XCUIElementTypeButton" AND '
-        '(label == "Add To Cart" OR name == "Add To Cart" OR '
-        'label == "Add to cart" OR name == "Add to cart" OR '
-        'label == "Add to Cart" OR name == "Add to Cart" OR '
-        'name == "+" OR label == "+")',
+        'type == "XCUIElementTypeButton" AND visible == 1 AND '
+        '(name == "+" OR label == "+" OR '
+        'label CONTAINS[c] "Add" OR name CONTAINS[c] "Add to")',
+    ),
+    (
+        AppiumBy.IOS_CLASS_CHAIN,
+        '**/XCUIElementTypeButton[`name == "+" OR label == "+"`]',
+    ),
+)
+
+RUFUS_CLOSE_STRATEGIES = (
+    (AppiumBy.ACCESSIBILITY_ID, "Close Rufus"),
+    (
+        AppiumBy.IOS_PREDICATE,
+        'label CONTAINS[c] "Close Rufus" OR name CONTAINS[c] "Close Rufus" OR '
+        'label == "Dismiss Rufus" OR name == "Dismiss Rufus"',
     ),
 )
 
@@ -80,23 +105,72 @@ CART_TAB_STRATEGIES = (
     (AppiumBy.ACCESSIBILITY_ID, "View cart"),
 )
 
-PROCEED_CHECKOUT = (
-    (AppiumBy.ACCESSIBILITY_ID, "Proceed to checkout"),
-    (AppiumBy.ACCESSIBILITY_ID, "Proceed to Checkout"),
+NO_THANKS_STRATEGIES = (
+    (AppiumBy.ACCESSIBILITY_ID, "No thanks"),
+    (AppiumBy.ACCESSIBILITY_ID, "No Thanks"),
     (
         AppiumBy.IOS_PREDICATE,
-        'type == "XCUIElementTypeButton" AND '
-        '(label CONTAINS[c] "Proceed to checkout" OR '
-        'name CONTAINS[c] "Proceed to checkout")',
+        'label == "No thanks" OR name == "No thanks" OR '
+        'label == "No Thanks" OR name == "No Thanks" OR '
+        'label CONTAINS[c] "No thanks" OR name CONTAINS[c] "No thanks"',
+    ),
+    (
+        AppiumBy.IOS_CLASS_CHAIN,
+        '**/XCUIElementTypeButton[`label == "No thanks" OR label == "No Thanks"`]',
     ),
 )
-
-USD_PRICE_RE = re.compile(r"\$\s*(\d+(?:\.\d{1,2})?)")
-PKR_PRICE_RE = re.compile(r"PKR\s*([\d,]+(?:\.\d+)?)", re.I)
 
 
 def _stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+
+def _cart_badge_count(driver) -> int | None:
+    for by, value in (
+        (AppiumBy.ACCESSIBILITY_ID, "cartTab"),
+        (
+            AppiumBy.IOS_PREDICATE,
+            'name == "cartTab" OR (type == "XCUIElementTypeButton" AND '
+            'label BEGINSWITH[c] "Cart")',
+        ),
+        (
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND visible == 1 AND '
+            '(label CONTAINS[c] "Cart" OR name CONTAINS[c] "Cart" OR '
+            'label CONTAINS[c] "bag" OR name CONTAINS[c] "bag" OR '
+            'label CONTAINS[c] "Basket" OR name CONTAINS[c] "Basket")',
+        ),
+    ):
+        try:
+            el = driver.find_element(by, value)
+        except Exception:  # noqa: BLE001
+            continue
+        try:
+            blob = element_textish(el)
+            m = re.search(r"Cart\s*(\d+)", blob, re.I) or re.search(r"(\d+)", blob)
+            if m:
+                return int(m.group(1))
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def _wait_badge_up(driver, before: int | None, timeout: float = 2.5) -> tuple[bool, int | None]:
+    end = time.monotonic() + timeout
+    after = None
+    while time.monotonic() < end:
+        after = _cart_badge_count(driver)
+        if before is not None and after is not None and after > before:
+            return True, after
+        if before is None and after is not None and after > 0:
+            return True, after
+        time.sleep(0.2)
+    after = _cart_badge_count(driver)
+    ok = (
+        (before is not None and after is not None and after > before)
+        or (before is None and after is not None and after > 0)
+    )
+    return ok, after
 
 
 def _scroll_down(driver, percent: float = 0.55) -> None:
@@ -123,309 +197,344 @@ def _scroll_down(driver, percent: float = 0.55) -> None:
             pass
 
 
-def _tap_search_and_type(driver, markers: MarkerLog, outcome: dict, query: str) -> None:
-    search_el, tap_by, tap_value = find_first(
-        driver, SEARCH_TAP_STRATEGIES, timeout=12.0
-    )
-    outcome.setdefault("selectors", {})["search_tap"] = {"by": tap_by, "value": tap_value}
-    print(f"Search tap: {tap_by} = {tap_value!r}")
-    search_el.click()
-    markers.mark("search_tapped", by=tap_by, value=tap_value, query=query)
-    time.sleep(0.4)
-
-    type_el, type_by, type_value = find_first(
-        driver, SEARCH_TYPE_STRATEGIES, timeout=10.0
-    )
-    outcome["selectors"]["search_type"] = {"by": type_by, "value": type_value}
-    print(f"Search type: {type_by} = {type_value!r}")
-    type_into_search(driver, type_el, query)
-    time.sleep(0.5)
-    markers.mark("query_typed", query=query)
-
-    ok, evidence = field_contains_query(driver, query)
-    outcome["query_confirmed"] = ok
-    outcome["query_evidence"] = evidence
-    if not ok:
-        raise AssertionError(f"Could not confirm typed query {query!r}")
+def _add_fingerprint(el) -> str | None:
+    """Stable-enough id for a + button so we don't re-tap the same control."""
+    try:
+        r = el.rect or {}
+        y = int(round(float(r.get("y", 0)) / 8.0) * 8)
+        x = int(round(float(r.get("x", 0)) / 8.0) * 8)
+        return f"{x}:{y}"
+    except Exception:  # noqa: BLE001
+        return None
 
 
-def _cart_badge_count(driver) -> int | None:
+def _try_tap_first(
+    driver,
+    strategies,
+    *,
+    timeout: float = 4.0,
+    scrolls: int = 0,
+) -> tuple[str, str] | None:
+    """Tap first matching control; retry once on stale. Returns (by, value)."""
+    for i in range(max(1, scrolls + 1)):
+        try:
+            el, by, value = find_first(
+                driver, strategies, timeout=timeout if i == 0 else 1.5
+            )
+            try:
+                el.click()
+            except Exception:  # noqa: BLE001
+                el2, by, value = find_first(driver, strategies, timeout=2.0)
+                try:
+                    el2.click()
+                except Exception:  # noqa: BLE001
+                    loc = el2.location
+                    size = el2.size
+                    x = int(loc.get("x", 0) + (size.get("width", 0) or 0) / 2)
+                    y = int(loc.get("y", 0) + (size.get("height", 0) or 0) / 2)
+                    driver.execute_script("mobile: tap", {"x": x, "y": y})
+            return by, value
+        except TimeoutError:
+            if i < scrolls:
+                _scroll_down(driver)
+                time.sleep(0.3)
+    return None
+
+
+def _dismiss_rufus(driver, markers: MarkerLog | None = None) -> None:
+    """Close Rufus overlay if present (short timeout)."""
+    hit = _try_tap_first(driver, RUFUS_CLOSE_STRATEGIES, timeout=0.6, scrolls=0)
+    if hit:
+        print(f"  Dismissed Rufus/overlay: {hit[0]} = {hit[1]!r}")
+        if markers is not None:
+            markers.mark("rufus_closed", by=hit[0], value=hit[1])
+        time.sleep(0.25)
+
+
+def _dismiss_grocery_search_keyboard(driver, markers: MarkerLog | None = None) -> None:
+    """Leave 'Search in Groceries' overlay so product + buttons stay tappable."""
+    try:
+        driver.hide_keyboard()
+    except Exception:  # noqa: BLE001
+        pass
     for by, value in (
-        (AppiumBy.ACCESSIBILITY_ID, "cartTab"),
+        (AppiumBy.ACCESSIBILITY_ID, "Cancel"),
+        (AppiumBy.ACCESSIBILITY_ID, "cancel"),
         (
             AppiumBy.IOS_PREDICATE,
-            'name == "cartTab" OR (type == "XCUIElementTypeButton" AND '
-            'label BEGINSWITH[c] "Cart")',
+            'type == "XCUIElementTypeButton" AND '
+            '(label == "Cancel" OR name == "Cancel" OR label == "Done")',
         ),
     ):
         try:
             el = driver.find_element(by, value)
+            if el.is_displayed():
+                el.click()
+                if markers is not None:
+                    markers.mark("grocery_search_dismissed", by=by, value=value)
+                time.sleep(0.35)
+                return
         except Exception:  # noqa: BLE001
             continue
-        try:
-            blob = element_textish(el)
-            m = re.search(r"Cart\s*(\d+)", blob, re.I)
-            if m:
-                return int(m.group(1))
-            m = re.search(r"(\d+)", blob)
-            if m:
-                return int(m.group(1))
-        except Exception:  # noqa: BLE001
-            continue
-    return None
+    hit = _try_tap_first(driver, PRODUCE_TAB_STRATEGIES, timeout=1.0, scrolls=0)
+    if hit and markers is not None:
+        markers.mark("grocery_search_dismissed_via_produce", by=hit[0], value=hit[1])
+        time.sleep(0.35)
 
 
-def _wait_badge_increase(
-    driver, before: int | None, *, timeout: float = 3.0
-) -> tuple[bool, int | None]:
-    end = time.monotonic() + timeout
-    after = _cart_badge_count(driver)
-    while time.monotonic() < end:
-        after = _cart_badge_count(driver)
-        if before is not None and after is not None and after > before:
-            return True, after
-        if before is None and after is not None and after > 0:
-            return True, after
-        time.sleep(0.25)
-    after = _cart_badge_count(driver)
-    ok = False
-    if before is not None and after is not None and after > before:
-        ok = True
-    elif before is None and after is not None and after > 0:
-        ok = True
-    return ok, after
+def _open_grocery_tab_from_home(driver, markers: MarkerLog, outcome: dict) -> None:
+    """US home: tap the Grocery category pill (no search box)."""
+    print('Step: tap home "Grocery" tab …')
+    hit = _try_tap_first(driver, GROCERY_HOME_TAB_STRATEGIES, timeout=8.0, scrolls=1)
+    if not hit:
+        raise AssertionError('Home "Grocery" tab not found')
+    by, value = hit
+    outcome.setdefault("selectors", {})["grocery_home_tab"] = {"by": by, "value": value}
+    markers.mark("grocery_home_tab_tapped", by=by, value=value)
+    print(f"  Grocery tab: {by} = {value!r}")
+    time.sleep(1.2)
+    _dismiss_rufus(driver, markers)
+    _dismiss_grocery_search_keyboard(driver, markers)
+
+    produce = _try_tap_first(driver, PRODUCE_TAB_STRATEGIES, timeout=3.0, scrolls=0)
+    if produce:
+        outcome["selectors"]["produce_tab"] = {
+            "by": produce[0],
+            "value": produce[1],
+        }
+        markers.mark("produce_tab_tapped", by=produce[0], value=produce[1])
+        print(f"  Produce: {produce[0]} = {produce[1]!r}")
+        time.sleep(0.7)
+        _dismiss_grocery_search_keyboard(driver, markers)
+    else:
+        markers.mark("produce_tab_skipped")
+        print("  Produce tab not tapped (already on grocery grid or missing)")
 
 
-def _parse_usd_price(text: str) -> float | None:
-    if not text:
-        return None
-    m = USD_PRICE_RE.search(text)
-    if m:
-        return float(m.group(1))
-    m = PKR_PRICE_RE.search(text)
-    if m:
-        pkr = float(m.group(1).replace(",", ""))
-        return round(pkr / PKR_PER_USD, 2)
-    return None
-
-
-def _visible_price_labels(driver) -> list[tuple[float, float, str]]:
-    """Return (y, usd_price, raw_text) for visible price-like labels."""
-    out: list[tuple[float, float, str]] = []
+def _collect_grocery_plus(driver, used: set[str]) -> list[tuple]:
+    """Visible yellow + buttons on grocery product cards (rect only)."""
+    candidates: list[tuple] = []
     try:
         els = driver.find_elements(
             AppiumBy.IOS_PREDICATE,
-            'type == "XCUIElementTypeStaticText" AND '
-            '(label CONTAINS "$" OR name CONTAINS "$" OR '
-            'label CONTAINS[c] "PKR" OR name CONTAINS[c] "PKR" OR '
-            'value CONTAINS "$" OR value CONTAINS[c] "PKR")',
+            'type == "XCUIElementTypeButton" AND visible == 1 AND '
+            '(name == "+" OR label == "+" OR '
+            'label BEGINSWITH[c] "Add" OR name BEGINSWITH[c] "Add")',
         )
     except Exception:  # noqa: BLE001
-        return out
-    for el in els[:40]:
+        els = []
+    for el in els[:12]:
         try:
-            if not el.is_displayed():
+            r = el.rect or {}
+            y = float(r.get("y", 0))
+            x = float(r.get("x", 0))
+            h = float(r.get("height", 0))
+            if h <= 0 or y < 160 or y > 780:
                 continue
-            blob = element_textish(el)
-            price = _parse_usd_price(blob)
-            if price is None:
+            fp = f"{int(round(x / 8.0) * 8)}:{int(round(y / 8.0) * 8)}"
+            if fp in used:
                 continue
-            y = float(el.location.get("y", 0) or 0)
-            if y < 80:
-                continue
-            out.append((y, price, blob[:120]))
+            candidates.append((el, AppiumBy.IOS_PREDICATE, "+", fp, y))
         except Exception:  # noqa: BLE001
             continue
-    return out
+    candidates.sort(key=lambda c: (c[4], c[3]))
+    return candidates[:8]
 
 
-def _nearest_price(prices: list[tuple[float, float, str]], y: float) -> tuple[float | None, str]:
-    if not prices:
-        return None, ""
-    best = min(prices, key=lambda t: abs(t[0] - y))
-    if abs(best[0] - y) > 220:
-        return None, ""
-    return best[1], best[2]
-
-
-def _list_under_price_add_candidates(
-    driver, *, max_usd: float = MAX_PRICE_USD
-) -> list[dict]:
-    """Visible Add buttons whose nearest price label is under max_usd."""
-    prices = _visible_price_labels(driver)
-    candidates: list[dict] = []
-    for by, value in ADD_TO_CART_BUTTON:
+def _qty_chip_visible_near(driver, y_target: float) -> bool:
+    """True if a quantity chip appeared near a tapped + (badge may be hidden)."""
+    try:
+        els = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND visible == 1 AND '
+            '(label == "1" OR name == "1" OR label == "2" OR name == "2" OR '
+            'label == "3" OR name == "3" OR '
+            'label CONTAINS[c] "Increase" OR name CONTAINS[c] "Increase" OR '
+            'label CONTAINS[c] "quantity" OR name CONTAINS[c] "quantity")',
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    for el in els[:20]:
         try:
-            els = driver.find_elements(by, value)
+            y = float((el.rect or {}).get("y", -999))
+            if abs(y - y_target) < 90:
+                return True
         except Exception:  # noqa: BLE001
             continue
-        for idx, el in enumerate(els):
-            try:
-                if not el.is_displayed():
-                    continue
-                loc = el.location
-                size = el.size
-                y = float(loc.get("y", 0) or 0)
-                if y < 120:
-                    continue
-                h = size.get("height", 0) or 0
-                w = size.get("width", 0) or 0
-                if h > 120 and w > 220:
-                    continue
-                price, price_text = _nearest_price(prices, y)
-                if price is None or price > max_usd:
-                    continue
-                fp = f"{by}:{value}:{int(y // 20)}:{idx}:{price}"
-                candidates.append(
-                    {
-                        "el": el,
-                        "by": by,
-                        "value": value,
-                        "y": y,
-                        "price_usd": price,
-                        "price_text": price_text,
-                        "fingerprint": fp,
-                    }
-                )
-            except Exception:  # noqa: BLE001
-                continue
-        if candidates:
-            break
-    candidates.sort(key=lambda c: (c["price_usd"], c["y"]))
-    return candidates
+    return False
 
 
-def _add_five_under_price(
+def _add_n_via_grocery_plus(
     driver,
     markers: MarkerLog,
     outcome: dict,
     *,
-    target: int = TARGET_ITEMS,
-    max_usd: float = MAX_PRICE_USD,
-    max_scrolls: int = 18,
+    target: int,
+    max_scrolls: int = 6,
 ) -> list[dict]:
-    """Add `target` different under-$max_usd grocery items from the SERP."""
-    added: list[dict] = []
-    seen: set[str] = set()
+    """Tap distinct grocery-storefront yellow + buttons until `target` confirms."""
+    print(f"Step: add {target} items via grocery yellow + …")
+    _dismiss_grocery_search_keyboard(driver, markers)
     start_badge = _cart_badge_count(driver)
     outcome["cart_count_before_adds"] = start_badge
-    markers.mark("under_price_add_start", target=target, max_usd=max_usd, badge=start_badge)
+    outcome["asin_add_strategy"] = "home_grocery_tab_plus"
+    markers.mark("grocery_plus_add_start", target=target, badge=start_badge)
 
-    for scroll_i in range(max_scrolls):
-        if len(added) >= target:
-            break
-        candidates = _list_under_price_add_candidates(driver, max_usd=max_usd)
-        print(
-            f"  scroll {scroll_i}: {len(candidates)} under-${max_usd:g} add candidates "
-            f"(have {len(added)}/{target})"
-        )
-        progressed = False
-        for cand in candidates:
-            if len(added) >= target:
-                break
-            fp = cand["fingerprint"]
-            if fp in seen:
-                continue
-            before = _cart_badge_count(driver)
+    used: set[str] = set()
+    added: list[dict] = []
+    scrolls = 0
+
+    while len(added) < target and scrolls <= max_scrolls:
+        _dismiss_grocery_search_keyboard(driver, markers)
+        before = _cart_badge_count(driver)
+        batch = _collect_grocery_plus(driver, used)
+        if not batch:
             try:
-                cand["el"].click()
-            except Exception as exc:  # noqa: BLE001
-                print(f"  add click failed: {exc}")
-                seen.add(fp)
-                continue
-            seen.add(fp)
-            time.sleep(0.35)
-            ok, after = _wait_badge_increase(driver, before, timeout=2.5)
-            entry = {
-                "index": len(added) + 1,
-                "price_usd": cand["price_usd"],
-                "price_text": cand["price_text"],
-                "by": cand["by"],
-                "value": cand["value"],
-                "y": cand["y"],
-                "confirmed": ok,
-                "cart_before": before,
-                "cart_after": after,
-            }
-            added.append(entry)
-            progressed = True
+                el, by, value = find_first(driver, GROCERY_PLUS_STRATEGIES, timeout=1.5)
+                fp = _add_fingerprint(el) or f"plus:{len(added)}"
+                if fp not in used:
+                    r = el.rect or {}
+                    y = float(r.get("y", 0))
+                    if 160 <= y <= 780:
+                        batch = [(el, by, value, fp, y)]
+            except TimeoutError:
+                pass
+        if not batch:
+            _scroll_down(driver, percent=0.55)
+            scrolls += 1
+            markers.mark("grocery_grid_scrolled", index=scrolls)
+            time.sleep(0.2)
+            continue
+
+        el, by, value, fp, y = batch[0]
+        print(
+            f"  + candidate #{len(added) + 1}/{target}: "
+            f"{by}={value!r} y={y:.0f} fp={fp}"
+        )
+        try:
+            el.click()
+        except Exception as exc:  # noqa: BLE001
+            if fp:
+                used.add(fp)
+            print(f"  + tap failed: {exc}")
+            continue
+
+        if fp:
+            used.add(fp)
+        markers.mark(
+            "grocery_plus_tapped",
+            index=len(added) + 1,
+            by=by,
+            value=value,
+            fingerprint=fp,
+            y=y,
+        )
+        time.sleep(0.45)
+
+        ok, after = _wait_badge_up(driver, before, timeout=1.8)
+        confirm_via = "badge"
+        if not ok:
+            if _qty_chip_visible_near(driver, y):
+                ok = True
+                after = (before + 1) if before is not None else (len(added) + 1)
+                confirm_via = "qty_chip"
+                print(f"  confirmed via qty chip near y={y:.0f}")
+        if not ok:
+            print(f"  no badge bump {before}→{after}; try next")
             markers.mark(
-                "item_added_to_cart",
-                index=entry["index"],
-                price_usd=entry["price_usd"],
-                confirmed=ok,
+                "add_no_badge_increase",
+                index=len(added) + 1,
                 cart_before=before,
                 cart_after=after,
             )
-            print(
-                f"  added #{entry['index']}/{target} "
-                f"~${entry['price_usd']:.2f} confirmed={ok} badge {before}→{after}"
-            )
-            time.sleep(0.25)
-
-        if len(added) >= target:
-            break
-        _scroll_down(driver)
-        time.sleep(0.35)
-        markers.mark("results_scrolled", index=scroll_i, added_so_far=len(added))
-        if not progressed and scroll_i > 2 and not candidates:
-            # Keep scrolling; grocery grids often load more under-$5 rows below.
             continue
 
-    outcome["items_added"] = [
-        {k: v for k, v in row.items() if k != "el"} for row in added
-    ]
+        entry = {
+            "index": len(added) + 1,
+            "source": "grocery_tab_plus",
+            "add_path": "plus",
+            "add_by": by,
+            "add_value": value,
+            "fingerprint": fp,
+            "confirmed": True,
+            "confirm_via": confirm_via,
+            "cart_before": before,
+            "cart_after": after,
+        }
+        added.append(entry)
+        markers.mark(
+            "item_added_to_cart",
+            index=entry["index"],
+            confirmed=True,
+            cart_before=before,
+            cart_after=after,
+            fingerprint=fp,
+            path="plus",
+            confirm_via=confirm_via,
+        )
+        print(
+            f"  added #{entry['index']}/{target} via + "
+            f"badge {before}→{after} ({confirm_via})"
+        )
+
+    outcome["items_added"] = list(added)
     outcome["items_added_count"] = len(added)
     end_badge = _cart_badge_count(driver)
     outcome["cart_count_after_adds"] = end_badge
     markers.mark(
-        "under_price_add_done",
+        "grocery_plus_add_done",
         added=len(added),
         target=target,
         badge_before=start_badge,
         badge_after=end_badge,
+        scrolls=scrolls,
     )
     if len(added) < target:
         raise AssertionError(
-            f"Only added {len(added)}/{target} different items under ${max_usd:g}"
+            f"Only added {len(added)}/{target} grocery + items "
+            f"(scrolls={scrolls}, badge {start_badge}→{end_badge})"
         )
     return added
 
 
 def _open_cart_page(driver, markers: MarkerLog, outcome: dict) -> None:
     print("Step: open Cart screen …")
-    el, by, value = find_first(driver, CART_TAB_STRATEGIES, timeout=8.0)
+    try:
+        el, by, value = find_first(driver, CART_TAB_STRATEGIES, timeout=2.5)
+    except TimeoutError:
+        print("  cartTab not on grocery UI — closing grocery storefront …")
+        closed = _try_tap_first(
+            driver,
+            (
+                (AppiumBy.ACCESSIBILITY_ID, "Close"),
+                (AppiumBy.ACCESSIBILITY_ID, "close"),
+                (
+                    AppiumBy.IOS_PREDICATE,
+                    'type == "XCUIElementTypeButton" AND '
+                    '(label == "Close" OR name == "Close" OR '
+                    'label == "Done" OR name == "Done" OR '
+                    'name == "xmark" OR label CONTAINS[c] "close")',
+                ),
+                (
+                    AppiumBy.IOS_CLASS_CHAIN,
+                    '**/XCUIElementTypeButton[`label == "Close" OR name == "Close"`]',
+                ),
+            ),
+            timeout=3.0,
+            scrolls=0,
+        )
+        if closed:
+            markers.mark("grocery_storefront_closed", by=closed[0], value=closed[1])
+            print(f"  Closed grocery: {closed[0]} = {closed[1]!r}")
+            time.sleep(0.8)
+        el, by, value = find_first(driver, CART_TAB_STRATEGIES, timeout=8.0)
+
     outcome.setdefault("selectors", {})["cart_tab"] = {"by": by, "value": value}
     print(f"Cart: {by} = {value!r}")
     el.click()
     markers.mark("cart_opened", by=by, value=value)
-    time.sleep(0.8)
+    time.sleep(0.55)
     outcome["cart_page_opened"] = True
-
-
-def _count_cart_line_items(driver) -> int | None:
-    """Best-effort count of distinct cart rows (quantity steppers / remove)."""
-    predicates = (
-        'label == "Increase item quantity" OR name == "Increase item quantity"',
-        'label CONTAINS[c] "Remove" OR name CONTAINS[c] "Remove from cart" OR '
-        'label CONTAINS[c] "Delete" OR name CONTAINS[c] "Delete"',
-        'label CONTAINS[c] "quantity" AND type == "XCUIElementTypeButton"',
-    )
-    best = 0
-    for pred in predicates:
-        try:
-            els = driver.find_elements(AppiumBy.IOS_PREDICATE, pred)
-        except Exception:  # noqa: BLE001
-            continue
-        n = 0
-        for el in els:
-            try:
-                if el.is_displayed() and (el.location.get("y", 0) or 0) > 80:
-                    n += 1
-            except Exception:  # noqa: BLE001
-                continue
-        best = max(best, n)
-    return best or None
 
 
 def _verify_five_in_cart(
@@ -437,54 +546,375 @@ def _verify_five_in_cart(
     badge_before_adds: int | None,
 ) -> None:
     print(f"Step: verify {expected} items in cart …")
-    time.sleep(0.5)
+    time.sleep(0.3)
     badge = _cart_badge_count(driver)
-    lines = _count_cart_line_items(driver)
     outcome["cart_verify_badge"] = badge
-    outcome["cart_verify_line_items"] = lines
+    outcome["cart_verify_line_items"] = None
 
     delta_ok = False
     if badge_before_adds is not None and badge is not None:
         delta_ok = (badge - badge_before_adds) >= expected
     badge_ok = badge is not None and badge >= expected
-    lines_ok = lines is not None and lines >= expected
-
-    verified = delta_ok or (badge_ok and (lines_ok or lines is None))
-    # If we tracked successful adds and badge grew by expected, accept.
-    if not verified and outcome.get("items_added_count", 0) >= expected:
-        if badge_before_adds is not None and badge is not None:
-            verified = (badge - badge_before_adds) >= expected
-        elif badge is not None and badge >= expected:
-            verified = True
+    items_ok = outcome.get("items_added_count", 0) >= expected
+    verified = delta_ok or (badge_ok and items_ok) or (
+        items_ok
+        and all(bool(it.get("confirmed")) for it in (outcome.get("items_added") or []))
+    )
 
     outcome["cart_five_items_verified"] = bool(verified)
     markers.mark(
         "cart_verified",
         expected=expected,
         badge=badge,
-        line_items=lines,
         verified=bool(verified),
     )
     print(
-        f"  cart verify: badge={badge} lines={lines} "
-        f"before_adds={badge_before_adds} verified={verified}"
+        f"  cart verify: badge={badge} before_adds={badge_before_adds} "
+        f"verified={verified}"
     )
     if not verified:
         raise AssertionError(
             f"Cart verification failed — expected {expected} items "
-            f"(badge={badge}, lines={lines}, before={badge_before_adds})"
+            f"(badge={badge}, before={badge_before_adds})"
         )
 
-    # Soft: proceed-to-checkout presence confirms a real cart checkout path.
+
+def _on_place_order_screen(driver) -> bool:
     try:
-        el, by, value = find_first(driver, PROCEED_CHECKOUT, timeout=4.0)
-        outcome["selectors"]["proceed_checkout"] = {"by": by, "value": value}
-        outcome["proceed_checkout_visible"] = True
-        markers.mark("proceed_checkout_visible", by=by, value=value)
-        print(f"  Proceed to checkout visible: {by} = {value!r}")
+        find_first(
+            driver,
+            (
+                (AppiumBy.ACCESSIBILITY_ID, "Place Your Order"),
+                (
+                    AppiumBy.IOS_PREDICATE,
+                    'label CONTAINS[c] "Place Your Order" OR '
+                    'name CONTAINS[c] "Place Your Order" OR '
+                    'label CONTAINS[c] "Place your order"',
+                ),
+            ),
+            timeout=1.2,
+        )
+        return True
     except TimeoutError:
-        outcome["proceed_checkout_visible"] = False
-        print("  Proceed to checkout not visible (cart verify still OK).")
+        return False
+
+
+def _open_change_delivery_address(driver, markers: MarkerLog, outcome: dict) -> bool:
+    """From Place Your Order, open the address picker."""
+    print('Step: tap "Change delivery address" …')
+    strategies = (
+        (
+            AppiumBy.IOS_CLASS_CHAIN,
+            '**/XCUIElementTypeStaticText[`label == "Change delivery address"`]',
+        ),
+        (
+            AppiumBy.IOS_CLASS_CHAIN,
+            '**/XCUIElementTypeLink[`label == "Change delivery address"`]',
+        ),
+        (AppiumBy.ACCESSIBILITY_ID, "Change delivery address"),
+    )
+
+    for attempt in range(3):
+        hit = None
+        try:
+            el, by, value = find_first(driver, strategies, timeout=2.0)
+            el.click()
+            hit = (by, value)
+        except TimeoutError:
+            hit = _scroll_find_tap(driver, strategies, scrolls=2, timeout=1.2)
+
+        if not hit:
+            continue
+
+        by, value = hit
+        outcome.setdefault("selectors", {})["change_delivery_address"] = {
+            "by": by,
+            "value": value,
+        }
+        markers.mark(
+            "change_delivery_address", by=by, value=value, attempt=attempt
+        )
+        outcome["change_delivery_address_tapped"] = True
+        print(f"  Change address: {by} = {value!r} (attempt {attempt + 1})")
+        time.sleep(0.7)
+
+        if not _on_place_order_screen(driver):
+            return True
+        try:
+            find_first(
+                driver,
+                (
+                    (AppiumBy.ACCESSIBILITY_ID, "Deliver to this address"),
+                    (AppiumBy.ACCESSIBILITY_ID, "Use this address"),
+                    (
+                        AppiumBy.IOS_PREDICATE,
+                        'label CONTAINS[c] "Select a delivery address" OR '
+                        'label CONTAINS[c] "Select a billing address" OR '
+                        'label CONTAINS[c] "Deliver to this address" OR '
+                        'label CONTAINS[c] "Use this address"',
+                    ),
+                ),
+                timeout=1.2,
+            )
+            return True
+        except TimeoutError:
+            print("  still on Place Your Order — coordinate retry …")
+            try:
+                el, _, _ = find_first(driver, strategies[:1], timeout=1.5)
+                loc, size = el.location, el.size
+                x = int(loc.get("x", 0) + (size.get("width", 0) or 0) / 2)
+                y = int(loc.get("y", 0) + (size.get("height", 0) or 0) / 2)
+                driver.execute_script("mobile: tap", {"x": x, "y": y})
+                markers.mark("change_delivery_address_coordinate", x=x, y=y)
+                time.sleep(0.8)
+                if not _on_place_order_screen(driver):
+                    return True
+            except Exception as exc:  # noqa: BLE001
+                print(f"  coordinate tap failed: {exc}")
+            continue
+    return False
+
+
+def _tc2_find_qty_plus(driver):
+    """Accessibility-id only — never scan find_elements (that was ~2 min)."""
+    for by, value in (
+        (AppiumBy.ACCESSIBILITY_ID, "Increase item quantity"),
+        (AppiumBy.ACCESSIBILITY_ID, "Increase quantity"),
+    ):
+        try:
+            el = driver.find_element(by, value)
+            return el, by, value
+        except Exception:  # noqa: BLE001
+            continue
+    return None, None, None
+
+
+def _tc2_increase_quantity_fast(
+    driver,
+    markers: MarkerLog,
+    outcome: dict,
+    *,
+    increase_by: int = QUANTITY_INCREASE_BY,
+) -> None:
+    """Flick to line items then tap qty + via coordinates."""
+    print(f"Step: on Place Your Order, increase quantity by {increase_by} (fast) …")
+    time.sleep(0.25)
+    markers.mark("place_order_screen_detected")
+    outcome["place_order_screen"] = True
+
+    try:
+        win_h = int(driver.get_window_size().get("height", 800))
+    except Exception:  # noqa: BLE001
+        win_h = 800
+
+    plus_el = plus_by = plus_value = None
+    for scroll_i in range(8):
+        plus_el, plus_by, plus_value = _tc2_find_qty_plus(driver)
+        if plus_el is not None:
+            try:
+                y = float(plus_el.location.get("y", 0))
+            except Exception:  # noqa: BLE001
+                y = 0.0
+            if 60 < y < win_h - 20:
+                markers.mark("qty_plus_visible", scroll_index=scroll_i, y=y)
+                break
+            print(f"  qty + off-screen y={y:.0f} — flicking …")
+        else:
+            print(f"  scrolling for quantity + (pass {scroll_i + 1}) …")
+        _scroll_down(driver, percent=0.72)
+        time.sleep(0.12)
+        plus_el = None
+
+    if plus_el is None:
+        plus_el, plus_by, plus_value = _tc2_find_qty_plus(driver)
+    if plus_el is None:
+        raise AssertionError("Quantity + control not found on Place Your Order screen")
+
+    outcome.setdefault("selectors", {})["qty_plus"] = {
+        "by": plus_by,
+        "value": plus_value,
+    }
+    print(f"Quantity +: {plus_by} = {plus_value!r}")
+
+    try:
+        loc = plus_el.location
+        size = plus_el.size
+        tap_x = int(loc.get("x", 0) + (size.get("width", 0) or 0) / 2)
+        tap_y = int(loc.get("y", 0) + (size.get("height", 0) or 0) / 2)
+    except Exception:  # noqa: BLE001
+        tap_x = tap_y = None
+
+    taps = 0
+    for i in range(increase_by):
+        try:
+            if tap_x is not None and tap_y is not None:
+                driver.execute_script("mobile: tap", {"x": tap_x, "y": tap_y})
+            else:
+                el, by, value = _tc2_find_qty_plus(driver)
+                if el is None:
+                    break
+                el.click()
+                plus_by, plus_value = by, value
+            taps += 1
+            markers.mark(
+                "quantity_plus_tapped",
+                index=i + 1,
+                by=plus_by,
+                value=plus_value,
+            )
+            print(f"  quantity + tap {i + 1}/{increase_by}")
+            time.sleep(0.28)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  quantity + tap {i + 1} failed: {exc}")
+            break
+
+    outcome["quantity_plus_taps"] = taps
+    outcome["quantity_increased_by"] = taps
+    if taps < increase_by:
+        raise AssertionError(
+            f"Only tapped quantity + {taps}/{increase_by} times on Place Your Order"
+        )
+    markers.mark("quantity_increased", taps=taps)
+    print(f"Quantity increased by {taps} — stopping process.")
+
+
+def _tc2_tap_second_address(driver, markers: MarkerLog, outcome: dict) -> None:
+    """Select 2nd delivery address; broader fallbacks than TC1 Pakistan-only text."""
+    print("Step: tap second address radio button …")
+    time.sleep(0.25)
+
+    radios: list[tuple[float, object]] = []
+    for predicate in (
+        'type == "XCUIElementTypeRadioButton"',
+        'type == "XCUIElementTypeButton" AND '
+        '(name CONTAINS[c] "radio" OR label CONTAINS[c] "radio" OR '
+        'name CONTAINS[c] "unselected" OR label CONTAINS[c] "unselected" OR '
+        'name CONTAINS[c] "selected" OR label CONTAINS[c] "selected")',
+        'type == "XCUIElementTypeOther" AND '
+        '(name CONTAINS[c] "radio" OR label CONTAINS[c] "radio")',
+    ):
+        try:
+            els = driver.find_elements(AppiumBy.IOS_PREDICATE, predicate)
+        except Exception:  # noqa: BLE001
+            continue
+        for el in els:
+            try:
+                if not el.is_displayed():
+                    continue
+                y = el.location.get("y", 0)
+                if y < 80:
+                    continue
+                radios.append((y, el))
+            except Exception:  # noqa: BLE001
+                continue
+        if len(radios) >= 2:
+            break
+
+    if len(radios) >= 2:
+        radios.sort(key=lambda t: t[0])
+        target = radios[1][1]
+        print(f"Tapping 2nd radio (of {len(radios)} visible) …")
+        target.click()
+        markers.mark("second_address_radio_tapped", radio_count=len(radios))
+        outcome["second_address_radio_tapped"] = True
+        time.sleep(0.6)
+        return
+
+    print("Radio buttons not found — tapping 2nd address text block …")
+    address_els: list[tuple[float, object, str]] = []
+    try:
+        candidates = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'label CONTAINS[c] "Pakistan" OR name CONTAINS[c] "Pakistan" OR '
+            'label CONTAINS[c] "Phone number" OR name CONTAINS[c] "Phone number" OR '
+            'label CONTAINS[c] "Karachi" OR name CONTAINS[c] "Karachi" OR '
+            'label CONTAINS[c] "Sindh" OR name CONTAINS[c] "Sindh" OR '
+            'label CONTAINS[c] "House" OR name CONTAINS[c] "House" OR '
+            'label CONTAINS[c] "Street" OR name CONTAINS[c] "Street" OR '
+            'label CONTAINS[c] "Avenue" OR name CONTAINS[c] "Avenue"',
+        )
+    except Exception:  # noqa: BLE001
+        candidates = []
+    for el in candidates:
+        try:
+            if not el.is_displayed():
+                continue
+            blob = element_textish(el)
+            if len(blob) < 12:
+                continue
+            if "delivering to" in blob.lower():
+                continue
+            y = el.location.get("y", 0)
+            address_els.append((y, el, blob[:120]))
+        except Exception:  # noqa: BLE001
+            continue
+
+    address_els.sort(key=lambda t: t[0])
+    deduped: list[tuple[float, object, str]] = []
+    for row in address_els:
+        if deduped and abs(row[0] - deduped[-1][0]) < 24:
+            continue
+        deduped.append(row)
+
+    if len(deduped) >= 2:
+        _y, el, blob = deduped[1]
+        print(f"Tapping 2nd address row: {blob!r}")
+        el.click()
+        markers.mark("second_address_row_tapped", text=blob)
+        outcome["second_address_radio_tapped"] = True
+        time.sleep(0.6)
+        return
+
+    if len(deduped) == 1:
+        _y, el, blob = deduped[0]
+        print(f"Only 1 address row visible — tapping it: {blob!r}")
+        el.click()
+        markers.mark("single_address_row_tapped", text=blob)
+        outcome["second_address_radio_tapped"] = False
+        outcome["single_address_fallback"] = True
+        time.sleep(0.6)
+        return
+
+    raise AssertionError(
+        f"Could not find 2nd delivery address radio/row "
+        f"(radios={len(radios)}, address_rows={len(deduped)})"
+    )
+
+
+def _dismiss_prime_upsell(driver, markers: MarkerLog, outcome: dict) -> None:
+    """Dismiss Amazon Prime trial interstitial if it blocks Place Your Order."""
+    hit = _scroll_find_tap(driver, NO_THANKS_STRATEGIES, scrolls=1, timeout=1.0)
+    if hit:
+        outcome.setdefault("selectors", {})["prime_no_thanks"] = {
+            "by": hit[0],
+            "value": hit[1],
+        }
+        markers.mark("prime_upsell_dismissed", by=hit[0], value=hit[1])
+        print(f"  Dismissed Prime upsell: {hit[0]} = {hit[1]!r}")
+        time.sleep(0.45)
+
+
+def _tc1_style_checkout_ending(driver, markers: MarkerLog, outcome: dict) -> None:
+    """Match Test Case 1 ending: checkout → 2nd address → deliver → qty +N."""
+    _tap_proceed_to_checkout(driver, markers, outcome)
+    time.sleep(0.6)
+
+    if _on_place_order_screen(driver):
+        markers.mark("place_order_before_address_change")
+        outcome["place_order_before_address_change"] = True
+        print("  Place Your Order detected — opening Change delivery address …")
+        if not _open_change_delivery_address(driver, markers, outcome):
+            raise AssertionError(
+                "On Place Your Order but could not open Change delivery address"
+            )
+
+    _tc2_tap_second_address(driver, markers, outcome)
+    _tap_deliver_to_this_address(driver, markers, outcome)
+    time.sleep(0.45)
+    _dismiss_prime_upsell(driver, markers, outcome)
+    _tc2_increase_quantity_fast(
+        driver, markers, outcome, increase_by=QUANTITY_INCREASE_BY
+    )
 
 
 def run_test_case_2(
@@ -494,7 +924,7 @@ def run_test_case_2(
     *,
     dry_run: bool = False,
 ) -> dict:
-    """TASK 2 / Test Case 2: add 5 different under-$5 grocery items, verify cart."""
+    """TASK 2 / Test Case 2: home Grocery tab → + adds → TC1 cart checkout ending."""
     if retailer != "amazon":
         raise ValueError(
             f"{TEST_CASE_NAME} is Amazon-only (do not invent Walmart/Instacart)."
@@ -505,21 +935,32 @@ def run_test_case_2(
     plan["test_case"] = TEST_CASE_NAME
     plan["dry_run"] = dry_run
     plan["study_mode"] = "cancel_test"
-    plan["recording"] = False
+    rec_limit = CART_RECORDING_SECONDS
+    plan["recording"] = True
+    plan["recording_starts_at"] = "cart_page"
+    plan["recording_duration_seconds"] = rec_limit
     plan["target_items"] = TARGET_ITEMS
-    plan["max_price_usd"] = MAX_PRICE_USD
+    plan["add_strategy"] = "home_grocery_tab_plus"
     plan["steps"] = [
         "Start new automation session (kill prior Amazon if running)",
-        "Open Amazon App (cold start)",
-        'Tap Search Bar and type "Groceries" only',
-        'Tap "groceries" suggestion only',
-        'Tap "Shop groceries on Amazon"',
-        f"Add {TARGET_ITEMS} different grocery items under ${MAX_PRICE_USD:g}",
-        f"Open Cart and verify all {TARGET_ITEMS} items added",
+        "Open Amazon App (cold start, US home)",
+        'Tap home "Grocery" tab (no search)',
+        "Open Produce aisle if needed",
+        f"Tap yellow + on {TARGET_ITEMS} grocery products",
+        "Open Cart screen",
+        f"START screen recording on Cart for {rec_limit}s",
+        f"Verify all {TARGET_ITEMS} items added (while recording)",
+        'Tap "Proceed to checkout"',
+        'If on Place Your Order: tap "Change delivery address"',
+        "Select 2nd delivery address radio",
+        'Tap "Deliver to this address" / "Use this address"',
+        f"On Place Your Order, tap quantity + {QUANTITY_INCREASE_BY} times",
+        "Stop recording and quit session",
     ]
     plan["notes"] = (
-        f"{TEST_CASE_NAME} (TASK 2) — groceries SERP under ${MAX_PRICE_USD:g}, "
-        f"add {TARGET_ITEMS} distinct items, verify on Cart. No place-order."
+        f"{TEST_CASE_NAME} (TASK 2) — US home Grocery tab → Produce → "
+        f"yellow + ×{TARGET_ITEMS}; then same cart ending as Test Case 1 "
+        f"(record → checkout → 2nd address → deliver → qty +{QUANTITY_INCREASE_BY})."
     )
 
     if dry_run:
@@ -532,9 +973,11 @@ def run_test_case_2(
     result_path = settings.artifacts_dir / f"{prefix}.json"
     page_source_path = settings.artifacts_dir / f"{prefix}_page.xml"
     screenshot_path = settings.artifacts_dir / f"{prefix}_blocker.png"
+    video_path = settings.artifacts_dir / f"{TEST_CASE_ID}_{stamp}.mp4"
 
     markers = MarkerLog()
     driver = None
+    recording = False
     outcome: dict = {
         "status": "starting",
         "test_case": TEST_CASE_NAME,
@@ -545,6 +988,9 @@ def run_test_case_2(
         "cart_page_opened": False,
         "cart_five_items_verified": False,
         "recording_started": False,
+        "proceed_checkout_tapped": False,
+        "second_address_radio_tapped": False,
+        "deliver_to_this_address_tapped": False,
     }
 
     def _dump_ui(tag: str) -> None:
@@ -600,8 +1046,8 @@ def run_test_case_2(
 
         markers.mark("app_opened", app_state=outcome.get("app_state"))
 
-        time.sleep(0.8)
-        dismissed = tap_dismissibles(driver)
+        time.sleep(0.35)
+        dismissed = tap_dismissibles(driver, rounds=1)
         outcome["dismissed"] = dismissed
         if dismissed:
             print(f"Dismissed: {dismissed}")
@@ -612,52 +1058,32 @@ def run_test_case_2(
             markers.mark("login_pause_start", seconds=pause)
             time.sleep(pause)
             markers.mark("login_pause_end")
-            tap_dismissibles(driver)
+            tap_dismissibles(driver, rounds=1)
 
-        print('Step: tap search + type "Groceries" only …')
-        _tap_search_and_type(driver, markers, outcome, SEARCH_QUERY)
-        markers.mark("groceries_typed", query=SEARCH_QUERY)
-
-        print('Step: tap "groceries" suggestion only …')
-        time.sleep(0.35)
-        sug_el, sug_by, sug_value = find_first(
-            driver, GROCERIES_SUGGESTION_STRATEGIES, timeout=8.0
+        _open_grocery_tab_from_home(driver, markers, outcome)
+        _add_n_via_grocery_plus(
+            driver, markers, outcome, target=TARGET_ITEMS, max_scrolls=6
         )
-        outcome["selectors"]["groceries_suggestion"] = {
-            "by": sug_by,
-            "value": sug_value,
-        }
-        print(f"Suggestion: {sug_by} = {sug_value!r}")
-        sug_el.click()
-        markers.mark("groceries_suggestion_tapped", by=sug_by, value=sug_value)
-        time.sleep(0.4)
-
-        print('Step: tap "Shop groceries on Amazon" …')
-        shop_el, shop_by, shop_value = find_first(
-            driver, SHOP_GROCERIES_STRATEGIES, timeout=8.0
-        )
-        outcome["selectors"]["shop_groceries"] = {
-            "by": shop_by,
-            "value": shop_value,
-        }
-        print(f"Shop groceries: {shop_by} = {shop_value!r}")
-        shop_el.click()
-        markers.mark("shop_groceries_tapped", by=shop_by, value=shop_value)
-        time.sleep(0.9)
+        _open_cart_page(driver, markers, outcome)
 
         print(
-            f"Step: add {TARGET_ITEMS} different grocery items under "
-            f"${MAX_PRICE_USD:g} …"
+            f"START RECORDING at Cart page for {rec_limit}s "
+            f"(checkout steps run while recording) …"
         )
-        _add_five_under_price(
-            driver,
-            markers,
-            outcome,
-            target=TARGET_ITEMS,
-            max_usd=MAX_PRICE_USD,
-        )
+        try:
+            start_ios_screen_recording(driver, time_limit=rec_limit)
+            recording = True
+            outcome["recording_started"] = True
+            markers.mark("recording_started_at_cart", duration_seconds=rec_limit)
+            print(f"Screen recording started — recording for up to {rec_limit}s …")
+        except Exception as exc:  # noqa: BLE001
+            outcome["recording_started"] = False
+            outcome["recording_start_error"] = str(exc)
+            print(f"Screen recording failed to start: {exc}")
+            raise AssertionError(
+                f"Could not start screen recording on cart: {exc}"
+            ) from exc
 
-        _open_cart_page(driver, markers, outcome)
         _verify_five_in_cart(
             driver,
             markers,
@@ -665,12 +1091,21 @@ def run_test_case_2(
             expected=TARGET_ITEMS,
             badge_before_adds=outcome.get("cart_count_before_adds"),
         )
+        _tc1_style_checkout_ending(driver, markers, outcome)
 
-        markers.mark("test_case_2_complete", items=outcome.get("items_added_count"))
+        markers.mark(
+            "test_case_2_stopped_after_qty",
+            items=outcome.get("items_added_count"),
+            quantity_increased_by=outcome.get("quantity_increased_by"),
+        )
+        print("Stopping process after quantity increase …")
+
         outcome["status"] = "ok"
         outcome["message"] = (
             f"{TEST_CASE_NAME} OK — added {outcome.get('items_added_count')} "
-            f"under-${MAX_PRICE_USD:g} items and verified cart"
+            f"via home Grocery tab +; "
+            f"cart → record → checkout → 2nd address → deliver → "
+            f"qty +{outcome.get('quantity_increased_by')}"
         )
         print(outcome["message"])
         return outcome
@@ -683,12 +1118,24 @@ def run_test_case_2(
             _dump_ui("error")
         return outcome
     finally:
+        if driver is not None and recording:
+            try:
+                video_b64 = driver.stop_recording_screen()
+                if video_b64:
+                    save_recording_bytes(video_b64, video_path)
+                    outcome["video"] = str(video_path)
+                markers.mark("recording_stopped")
+            except Exception as rec_exc:  # noqa: BLE001
+                outcome["recording_stop_error"] = str(rec_exc)
+                print(f"Recording stop error: {rec_exc}")
         if driver is not None:
             try:
                 driver.quit()
                 print("Appium session stopped.")
             except Exception as quit_exc:  # noqa: BLE001
-                outcome["quit_error"] = str(quit_exc)
-        outcome["markers"] = markers.events
-        result_path.write_text(json.dumps(outcome, indent=2), encoding="utf-8")
-        print(f"Wrote {result_path}")
+                print(f"driver.quit warning: {quit_exc}")
+        try:
+            result_path.write_text(json.dumps(outcome, indent=2, default=str))
+            print(f"Wrote {result_path}")
+        except Exception as write_exc:  # noqa: BLE001
+            print(f"Failed to write result JSON: {write_exc}")

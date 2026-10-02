@@ -20,6 +20,10 @@ SCENARIOS = (
     "test_case_1",
     "select_grocery_under_4",  # alias for test_case_1
     "test_case_2",
+    "test_case_3",
+    "test_case_4",
+    "test_case_5",
+    "test_case_6",
     "task1_add_grocery_to_cart",
     "task1_cart_checkout_cancel",
 )
