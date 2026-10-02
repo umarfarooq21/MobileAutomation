@@ -886,6 +886,12 @@ def _open_address_from_place_order(driver, markers: MarkerLog, outcome: dict) ->
     """Open address picker via the visible Change delivery address link (fast path)."""
     print('Step: tap "Change delivery address" …')
 
+    try:
+        size = driver.get_window_size() or {}
+        win_h = float(size.get("height") or 844)
+    except Exception:  # noqa: BLE001
+        win_h = 844.0
+
     def _on_address_picker() -> bool:
         return _screen_matches(
             driver,
@@ -907,7 +913,36 @@ def _open_address_from_place_order(driver, markers: MarkerLog, outcome: dict) ->
             timeout=0.4,
         )
 
+    def _swipe_toward_address(*, direction: str) -> None:
+        # After expanding slots the address block is often above the fold.
+        mid_x = 195
+        if direction == "up":
+            driver.execute_script(
+                "mobile: swipe",
+                {"direction": "up", "velocity": 800},
+            )
+        else:
+            driver.execute_script(
+                "mobile: dragFromToForDuration",
+                {
+                    "duration": 0.25,
+                    "fromX": mid_x,
+                    "fromY": int(win_h * 0.35),
+                    "toX": mid_x,
+                    "toY": int(win_h * 0.75),
+                },
+            )
+        time.sleep(0.2)
+
+    def _onscreen(y: float) -> bool:
+        return 70.0 <= y <= win_h * 0.90
+
     def _tap_xy(x: float, y: float, *, via: str) -> bool:
+        if not _onscreen(y):
+            print(
+                f"  skip off-screen Change delivery tap @ ({x:.0f},{y:.0f}) via={via}"
+            )
+            return False
         print(f"  Change delivery coordinate tap @ ({x:.0f},{y:.0f}) via={via}")
         driver.execute_script(
             "mobile: tap", {"x": int(round(x)), "y": int(round(y))}
@@ -936,6 +971,21 @@ def _open_address_from_place_order(driver, markers: MarkerLog, outcome: dict) ->
             y = float(r.get("y", 0)) + float(r.get("height", 20)) / 2.0
         except Exception:  # noqa: BLE001
             x, y = 100.0, 300.0
+        if not _onscreen(y):
+            # Slot expand leaves this link above/below the viewport — nudge then re-read.
+            print(f"  Change delivery off-screen y={y:.0f}; scrolling into view …")
+            if y < 70:
+                _swipe_toward_address(direction="down")  # content moves down = finger up
+            else:
+                _swipe_toward_address(direction="up")
+            try:
+                r = el.rect or {}
+                x = float(r.get("x", 0)) + float(r.get("width", 100)) / 2.0
+                y = float(r.get("y", 0)) + float(r.get("height", 20)) / 2.0
+            except Exception:  # noqa: BLE001
+                pass
+            if not _onscreen(y):
+                return False
         # Prefer coordinate tap — Link nodes are often accessible=false in checkout webview.
         if _tap_xy(x, y, via=via):
             return True
@@ -956,6 +1006,24 @@ def _open_address_from_place_order(driver, markers: MarkerLog, outcome: dict) ->
         except Exception:  # noqa: BLE001
             pass
         return False
+
+    # 0) Slot expand often leaves address above the fold — scroll up first.
+    for _ in range(2):
+        try:
+            el = driver.find_element(
+                AppiumBy.ACCESSIBILITY_ID, "Change delivery address"
+            )
+            r = el.rect or {}
+            y = float(r.get("y", 0))
+            if _onscreen(y):
+                break
+            if y < 70:
+                _swipe_toward_address(direction="down")
+            else:
+                _swipe_toward_address(direction="up")
+        except Exception:  # noqa: BLE001
+            _swipe_toward_address(direction="down")
+            break
 
     # 1) Fast accessibility / class-chain hits (avoid full-tree predicate scans).
     fast_strategies = (
@@ -983,7 +1051,7 @@ def _open_address_from_place_order(driver, markers: MarkerLog, outcome: dict) ->
         driver.execute_script(
             "mobile: scroll",
             {
-                "direction": "down",
+                "direction": "up",
                 "predicateString": 'label == "Change delivery address"',
             },
         )
@@ -1013,8 +1081,19 @@ def _open_address_from_place_order(driver, markers: MarkerLog, outcome: dict) ->
     except Exception:  # noqa: BLE001
         pass
 
-    # 4) Last resort: known iPhone 390pt coords from Place Your Order layout.
-    if _tap_xy(103.0, 304.0, via="layout_coords"):
+    # 4) Last resort: known iPhone 390pt coords — only if place-order address cues exist.
+    if _screen_matches(
+        driver,
+        (
+            (AppiumBy.ACCESSIBILITY_ID, "Change delivery address"),
+            (
+                AppiumBy.IOS_PREDICATE,
+                'label BEGINSWITH[c] "Delivering to" OR '
+                'label CONTAINS[c] "See more delivery slots"',
+            ),
+        ),
+        timeout=0.3,
+    ) and _tap_xy(103.0, 304.0, via="layout_coords"):
         return True
 
     _mark_step(
@@ -1263,42 +1342,152 @@ def _open_payment_from_place_order(driver, markers: MarkerLog, outcome: dict) ->
 
 
 def _still_on_cart(driver) -> bool:
+    """Cheap cart check — avoid full checkout-tree scans on huge cart pages."""
     try:
-        find_first(driver, PROCEED_CHECKOUT_TC3, timeout=0.7)
+        find_first(
+            driver,
+            (
+                (
+                    AppiumBy.IOS_PREDICATE,
+                    'type == "XCUIElementTypeButton" AND visible == 1 AND '
+                    '(label BEGINSWITH[c] "Proceed to checkout" OR '
+                    'name BEGINSWITH[c] "Proceed to checkout")',
+                ),
+            ),
+            timeout=0.55,
+        )
         return True
     except TimeoutError:
         return False
 
 
+def _left_cart_for_checkout(driver) -> bool:
+    """True when Proceed is gone OR a checkout / authorize surface is visible."""
+    if _screen_matches(
+        driver,
+        (
+            (AppiumBy.ACCESSIBILITY_ID, "Continue"),
+            (AppiumBy.ACCESSIBILITY_ID, "No thanks"),
+            (AppiumBy.ACCESSIBILITY_ID, "Place your order"),
+            (AppiumBy.ACCESSIBILITY_ID, "Place Your Order"),
+            (AppiumBy.ACCESSIBILITY_ID, "Authorize Payment Method"),
+            (
+                AppiumBy.IOS_PREDICATE,
+                'label BEGINSWITH[c] "Select a Payment" OR '
+                'name BEGINSWITH[c] "Select a Payment" OR '
+                'label == "Paying with" OR name == "Paying with" OR '
+                'label CONTAINS[c] "Authorize Payment" OR '
+                'name CONTAINS[c] "Authorize Payment" OR '
+                'label CONTAINS[c] "Verify by Phone"',
+            ),
+        ),
+        timeout=0.4,
+    ):
+        return True
+    return not _still_on_cart(driver)
+
+
 def _tap_proceed_until_left_cart(driver, markers: MarkerLog, outcome: dict) -> None:
     """Tap Proceed to checkout and verify we leave the cart screen."""
     print('Step: tap "Proceed to checkout" …')
-    for attempt in range(3):
+
+    def _scroll_cart_to_top() -> None:
         try:
-            el, by, value = find_first(driver, PROCEED_CHECKOUT_TC3, timeout=3.0)
-        except TimeoutError as exc:
-            if attempt == 0:
-                raise AssertionError("Proceed to checkout not found on cart") from exc
-            break
-        try:
-            el.click()
+            driver.execute_script(
+                "mobile: swipe", {"direction": "down", "percent": 0.65}
+            )
         except Exception:  # noqa: BLE001
-            loc, size = el.location, el.size
-            x = int(loc.get("x", 0) + (size.get("width", 0) or 0) / 2)
-            y = int(loc.get("y", 0) + (size.get("height", 0) or 0) / 2)
-            driver.execute_script("mobile: tap", {"x": x, "y": y})
-        markers.mark("proceed_checkout", by=by, value=value, attempt=attempt + 1)
+            try:
+                driver.execute_script(
+                    "mobile: dragFromToForDuration",
+                    {
+                        "duration": 0.18,
+                        "fromX": 195,
+                        "fromY": 300,
+                        "toX": 195,
+                        "toY": 580,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        time.sleep(0.25)
+
+    _scroll_cart_to_top()
+
+    for attempt in range(4):
+        try:
+            el, by, value = find_first(
+                driver,
+                (
+                    (
+                        AppiumBy.IOS_PREDICATE,
+                        'type == "XCUIElementTypeButton" AND visible == 1 AND '
+                        '(label BEGINSWITH[c] "Proceed to checkout" OR '
+                        'name BEGINSWITH[c] "Proceed to checkout" OR '
+                        'label CONTAINS[c] "Proceed to checkout" OR '
+                        'name CONTAINS[c] "Proceed to checkout")',
+                    ),
+                    (AppiumBy.ACCESSIBILITY_ID, "Proceed to checkout"),
+                ),
+                timeout=3.0,
+            )
+        except TimeoutError as exc:
+            if attempt < 3:
+                print("  Proceed not visible — scrolling cart to top …")
+                _scroll_cart_to_top()
+                continue
+            raise AssertionError("Proceed to checkout not found on cart") from exc
+
+        r = {}
+        try:
+            r = el.rect or {}
+        except Exception:  # noqa: BLE001
+            r = {}
+        cx = float(r.get("x", 15)) + float(r.get("width", 360)) / 2.0
+        cy = float(r.get("y", 178)) + float(r.get("height", 42)) / 2.0
+        if cy < 80 or cy > 780:
+            print(f"  Proceed off-screen y={cy:.0f} — scrolling to top …")
+            _scroll_cart_to_top()
+            continue
+
+        print(f"  Proceed tap @ ({cx:.0f},{cy:.0f}) attempt={attempt + 1}")
+        # One activation only. Prefer coordinate tap — more reliable on cart webviews.
+        try:
+            driver.execute_script(
+                "mobile: tap",
+                {"x": int(round(cx)), "y": int(round(cy))},
+            )
+        except Exception:  # noqa: BLE001
+            try:
+                el.click()
+            except Exception as click_exc:  # noqa: BLE001
+                print(f"  Proceed activation failed: {click_exc}")
+
+        markers.mark(
+            "proceed_checkout",
+            by=by,
+            value=value,
+            attempt=attempt + 1,
+            x=cx,
+            y=cy,
+        )
         outcome["proceed_checkout_tapped"] = True
         outcome.setdefault("selectors", {})["proceed_checkout"] = {
             "by": by,
             "value": value,
         }
         print(f"  Proceed: {by} = {value!r} (attempt {attempt + 1})")
-        time.sleep(0.85)
-        if not _still_on_cart(driver):
-            return
+
+        time.sleep(2.0)
+        for _ in range(10):
+            if _left_cart_for_checkout(driver):
+                return
+            time.sleep(0.5)
         print("  still on cart after Proceed — retrying …")
-    if _still_on_cart(driver):
+        _scroll_cart_to_top()
+        time.sleep(0.2)
+
+    if not _left_cart_for_checkout(driver):
         raise AssertionError("Proceed to checkout tapped but still on Cart screen")
 
 

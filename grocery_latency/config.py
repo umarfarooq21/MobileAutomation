@@ -24,6 +24,9 @@ SCENARIOS = (
     "test_case_4",
     "test_case_5",
     "test_case_6",
+    "test_case_7",
+    "test_case_8",
+    "test_case_9",
     "task1_add_grocery_to_cart",
     "task1_cart_checkout_cancel",
 )

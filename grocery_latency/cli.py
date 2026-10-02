@@ -12,6 +12,9 @@ from grocery_latency.scenarios.test_case_3 import run_test_case_3
 from grocery_latency.scenarios.test_case_4 import run_test_case_4
 from grocery_latency.scenarios.test_case_5 import run_test_case_5
 from grocery_latency.scenarios.test_case_6 import run_test_case_6
+from grocery_latency.scenarios.test_case_7 import run_test_case_7
+from grocery_latency.scenarios.test_case_8 import run_test_case_8
+from grocery_latency.scenarios.test_case_9 import run_test_case_9
 from grocery_latency.scenarios.task1_add_grocery_to_cart import (
     run_task1_add_grocery_to_cart,
 )
@@ -39,8 +42,9 @@ def main() -> None:
     required=True,
     help=(
         "Scenario: open_only | search_groceries | test_case_1 | test_case_2 | "
-        "test_case_3 | test_case_4 | test_case_5 | test_case_6 | "
-        "task1_add_grocery_to_cart | task1_cart_checkout_cancel. "
+        "test_case_3 | test_case_4 | test_case_5 | test_case_6 | test_case_7 | "
+        "test_case_8 | test_case_9 | task1_add_grocery_to_cart | "
+        "task1_cart_checkout_cancel. "
         "(select_grocery_under_4 is an alias for test_case_1.)"
     ),
 )
@@ -73,6 +77,12 @@ def run_cmd(retailer: str, scenario: str, dry_run: bool) -> None:
         outcome = run_test_case_5(settings, retailer, bundle_id, dry_run=dry_run)
     elif scenario == "test_case_6":
         outcome = run_test_case_6(settings, retailer, bundle_id, dry_run=dry_run)
+    elif scenario == "test_case_7":
+        outcome = run_test_case_7(settings, retailer, bundle_id, dry_run=dry_run)
+    elif scenario == "test_case_8":
+        outcome = run_test_case_8(settings, retailer, bundle_id, dry_run=dry_run)
+    elif scenario == "test_case_9":
+        outcome = run_test_case_9(settings, retailer, bundle_id, dry_run=dry_run)
     elif scenario == "task1_add_grocery_to_cart":
         outcome = run_task1_add_grocery_to_cart(
             settings, retailer, bundle_id, dry_run=dry_run

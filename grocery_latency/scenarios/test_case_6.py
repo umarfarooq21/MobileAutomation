@@ -37,7 +37,6 @@ from grocery_latency.scenarios.test_case_3 import (
     _open_address_from_place_order,
     _open_payment_from_place_order,
     _screen_matches,
-    _scroll_down,
     _tap_no_thanks,
     _tap_proceed_until_left_cart,
     _wait_after_payment,
@@ -261,7 +260,7 @@ def _tap_see_more_delivery_slots(driver, markers: MarkerLog, outcome: dict) -> b
                 "  See more delivery slots: accessibility id = "
                 "'See more delivery slots'"
             )
-            time.sleep(0.35)
+            time.sleep(0.2)
             return True
     except Exception:  # noqa: BLE001
         pass
@@ -280,7 +279,7 @@ def _tap_see_more_delivery_slots(driver, markers: MarkerLog, outcome: dict) -> b
         )
         outcome["see_more_delivery_slots_tapped"] = True
         print(f"  See more delivery slots: {by} = {value!r}")
-        time.sleep(0.35)
+        time.sleep(0.2)
         return True
 
     # Last resort: 2 coordinate probes — only accept if chip count grows.
@@ -382,28 +381,25 @@ def _collect_expanded_slot_chips(
 ) -> list[dict]:
     """Tomorrow/day time-window chip buttons after 'See more delivery slots'.
 
-    Chips use labels like 'Tomorrow\\n8 PM - 11 PM'. After expand, the page often
-    scrolls so chips sit above the viewport (negative y / visible=false) — still
-    collect those so we can scroll them back and tap the last one.
+    Keep this cheap: one find_elements + rect/name only (no double attribute fetches).
     """
     chips: list[dict] = []
     try:
         els = driver.find_elements(
             AppiumBy.IOS_PREDICATE,
             'type == "XCUIElementTypeButton" AND '
-            '(label CONTAINS[c] "Tomorrow" OR name CONTAINS[c] "Tomorrow" OR '
-            'label CONTAINS[c] "Today" OR name CONTAINS[c] "Today")',
+            '(name CONTAINS[c] "Tomorrow" OR name CONTAINS[c] "Today" OR '
+            'label CONTAINS[c] "Tomorrow" OR label CONTAINS[c] "Today")',
         )
     except Exception:  # noqa: BLE001
         els = []
 
-    for el in els[:24]:
+    for el in els[:20]:
         try:
-            label = (
-                (el.get_attribute("label") or "")
-                or (el.get_attribute("name") or "")
-                or ""
-            ).strip()
+            # `name` usually carries "Tomorrow\\n8 PM - 11 PM"; avoid a second round-trip.
+            label = (el.get_attribute("name") or "").strip()
+            if not label:
+                label = (el.get_attribute("label") or "").strip()
             if not _looks_like_slot_chip(label):
                 continue
             r = el.rect or {}
@@ -411,12 +407,10 @@ def _collect_expanded_slot_chips(
             h = float(r.get("height", 0))
             y = float(r.get("y", 0))
             x = float(r.get("x", 0))
-            # Chip size from live dump: ~113×52.
             if w < 50 or h < 22 or w > 260 or h > 120:
                 continue
-            if not include_offscreen:
-                if y < 90 or y > 820:
-                    continue
+            if not include_offscreen and (y < 90 or y > 820):
+                continue
             chips.append(
                 {
                     "el": el,
@@ -432,7 +426,6 @@ def _collect_expanded_slot_chips(
         except Exception:  # noqa: BLE001
             continue
 
-    # Dedupe by position; sort top→bottom, left→right so "last" = bottom-right.
     chips.sort(key=lambda c: (round(c["y"] / 12.0), round(c["x"] / 12.0)))
     deduped: list[dict] = []
     for c in chips:
@@ -447,12 +440,10 @@ def _collect_expanded_slot_chips(
 def _select_last_delivery_slot(driver, markers: MarkerLog, outcome: dict) -> bool:
     """After expand, tap the last (bottom-most / rightmost) delivery slot chip."""
     print("Step: select last delivery slot from expanded list …")
-    _dismiss_prime_if_blocking(driver, markers, outcome, why="before slot collect")
 
     chips: list[dict] = []
-    for attempt in range(4):
+    for attempt in range(3):
         chips = _collect_expanded_slot_chips(driver, include_offscreen=True)
-        # Slightly generous band — last row often sits near y≈750–800.
         onscreen = [c for c in chips if 80 <= c["y"] <= 820]
         if len(onscreen) >= 2:
             chips = onscreen
@@ -475,12 +466,9 @@ def _select_last_delivery_slot(driver, markers: MarkerLog, outcome: dict) -> boo
             else:
                 chips = onscreen or chips
                 break
-            time.sleep(0.2)
+            time.sleep(0.12)
             continue
-        time.sleep(0.2)
-        if attempt == 1 and _screen_matches(driver, SEE_MORE_SLOTS, timeout=0.25):
-            print("  See more still visible — tapping again …")
-            _tap_see_more_delivery_slots(driver, markers, outcome)
+        time.sleep(0.12)
 
     if len(chips) < 2:
         markers.mark(
@@ -498,28 +486,24 @@ def _select_last_delivery_slot(driver, markers: MarkerLog, outcome: dict) -> boo
         print(f"  no expanded delivery-slot chips found (got {len(chips)})")
         return False
 
-    # Last in reading order = bottom row, rightmost.
     pick = chips[-1]
     print(
         f"  expanded slots={len(chips)}; tapping last "
         f"#{len(chips)} label={pick['label']!r} @ ({pick['cx']:.0f},{pick['cy']:.0f})"
     )
-    # One nudge if last chip is clipped at the bottom edge.
+    # Prefer coordinate tap — avoids stale element after expand animation.
+    size = driver.get_window_size() or {}
+    h = float(size.get("height") or 844)
     if pick["y"] > 760:
         _scroll_slots_into_view(driver, direction="down")
-        time.sleep(0.15)
+        time.sleep(0.1)
         refreshed = _collect_expanded_slot_chips(driver, include_offscreen=True)
         onscreen = [c for c in refreshed if 80 <= c["y"] <= 820]
         if onscreen:
             chips = onscreen
             pick = chips[-1]
-    try:
-        pick["el"].click()
-    except Exception:  # noqa: BLE001
-        size = driver.get_window_size() or {}
-        h = float(size.get("height") or 844)
-        _tap_center(driver, pick["cx"], min(pick["cy"], h * 0.88))
-    time.sleep(0.2)
+    _tap_center(driver, pick["cx"], min(pick["cy"], h * 0.88))
+    time.sleep(0.12)
 
     markers.mark(
         "last_delivery_slot_tapped",
@@ -551,18 +535,10 @@ def _expand_and_select_last_slot(
     """Dismiss Prime if needed → See more delivery slots → pick the last chip."""
     if outcome.get("delivery_slot_changed"):
         return True
-    _dismiss_prime_if_blocking(driver, markers, outcome, why="before expand")
-    # Only scroll if See more is not already visible.
-    try:
-        if not _screen_matches(driver, SEE_MORE_SLOTS, timeout=0.3):
-            _scroll_down(driver, percent=0.4)
-            time.sleep(0.12)
-    except Exception:  # noqa: BLE001
-        pass
+    # Skip pre-scroll / extra dismiss — See more is usually already visible.
     if not _tap_see_more_delivery_slots(driver, markers, outcome):
         return False
-    # Do not pre-scroll — let slot select choose direction from chip Y positions.
-    time.sleep(0.2)
+    time.sleep(0.12)
     return _select_last_delivery_slot(driver, markers, outcome)
 
 
@@ -712,6 +688,9 @@ def _tc6_checkout_edits(driver, markers: MarkerLog, outcome: dict) -> None:
                         'Could not expand "See more delivery slots" and select last slot'
                     )
                 slot_done = True
+                time.sleep(0.12)
+                # Expanding/selecting last slot scrolls the page; address sits above.
+                _scroll_slots_into_view(driver, direction="up")
                 time.sleep(0.12)
             if not payment_done:
                 if _open_payment_from_place_order(driver, markers, outcome):
