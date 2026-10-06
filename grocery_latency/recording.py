@@ -8,6 +8,7 @@ found"). Default codec is also MJPEG, which many players struggle with.
 from __future__ import annotations
 
 import base64
+import os
 import shutil
 import struct
 import subprocess
@@ -68,6 +69,12 @@ def transcode_to_h264(src: Path, dest: Path) -> bool:
     """
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
+        # Common install location used on this Mac (may be missing from PATH).
+        candidate = Path.home() / ".local" / "bin" / "ffmpeg"
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            ffmpeg = str(candidate)
+    if not ffmpeg:
+        print("ffmpeg not found on PATH (or ~/.local/bin) — skipping H.264 transcode")
         return False
     cmd = [
         ffmpeg,
