@@ -18,6 +18,7 @@ from grocery_latency.scenarios.test_case_8 import run_test_case_8
 from grocery_latency.scenarios.test_case_9 import run_test_case_9
 from grocery_latency.scenarios.test_case_walmart_1 import run_test_case_walmart_1
 from grocery_latency.scenarios.test_case_walmart_2 import run_test_case_walmart_2
+from grocery_latency.scenarios.test_case_walmart_3 import run_test_case_walmart_3
 from grocery_latency.scenarios.task1_add_grocery_to_cart import (
     run_task1_add_grocery_to_cart,
 )
@@ -47,7 +48,7 @@ def main() -> None:
         "Scenario: open_only | search_groceries | test_case_1 | test_case_2 | "
         "test_case_3 | test_case_4 | test_case_5 | test_case_6 | test_case_7 | "
         "test_case_7_2 | test_case_8 | test_case_9 | test_case_walmart_1 | "
-        "test_case_walmart_2 | task1_add_grocery_to_cart | "
+        "test_case_walmart_2 | test_case_walmart_3 | task1_add_grocery_to_cart | "
         "task1_cart_checkout_cancel. "
         "(select_grocery_under_4 is an alias for test_case_1.)"
     ),
@@ -59,7 +60,7 @@ def main() -> None:
     ),
     default=None,
     help=(
-        "Basket sample for TC7_2 or Walmart TC2 (A–H): items × units. "
+        "Basket sample for TC7_2 or Walmart TC2/TC3 (A–H): items × units. "
         "Default: env BASKET_SIZE or A."
     ),
 )
@@ -114,6 +115,14 @@ def run_cmd(
         )
     elif scenario == "test_case_walmart_2":
         outcome = run_test_case_walmart_2(
+            settings,
+            retailer,
+            bundle_id,
+            dry_run=dry_run,
+            basket_size=basket_size,
+        )
+    elif scenario == "test_case_walmart_3":
+        outcome = run_test_case_walmart_3(
             settings,
             retailer,
             bundle_id,

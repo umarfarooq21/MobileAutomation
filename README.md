@@ -58,6 +58,8 @@ python -m grocery_latency run --retailer walmart --scenario test_case_walmart_2 
 python -m grocery_latency run --retailer walmart --scenario test_case_walmart_2 --basket-size D
 python -m grocery_latency run --retailer walmart --scenario test_case_walmart_2 --basket-size E
 python -m grocery_latency run --retailer walmart --scenario test_case_walmart_2 --basket-size H
+python -m grocery_latency run --retailer walmart --scenario test_case_walmart_3 --dry-run
+python -m grocery_latency run --retailer walmart --scenario test_case_walmart_3
 python -m grocery_latency run --retailer amazon --scenario task1_add_grocery_to_cart --dry-run
 python -m grocery_latency run --retailer amazon --scenario task1_add_grocery_to_cart
 python -m grocery_latency run --retailer amazon --scenario task1_cart_checkout_cancel --dry-run
@@ -89,6 +91,8 @@ python -m grocery_latency run --retailer amazon --scenario task1_cart_checkout_c
 
 **Test Case Walmart 2** (`test_case_walmart_2`): Same checkout path as Walmart TC1, but basket size follows study samples **A–H** (select with `--basket-size` / `BASKET_SIZE`): **A** 1×1, **B** 10×1, **C** 1×25, **D** 25×1, **E** 5×10, **F** 50×1, **G** 50×5, **H** 10×10. My Items uses **+ Add once** (qty 1); unit scaling is done on **Cart** (qty + on every line). Day/slot toggles last↔2nd-last. No place-order.
 
+**Test Case Walmart 3** (`test_case_walmart_3`): Same as Walmart TC2 through Checkout, but unit scaling is on **Checkout → Item details → View** (every line raised to `units_each`, then **Done**), not on the Cart screen. No place-order.
+
 | Scenario | What it does |
 | --- | --- |
 | `open_only` | Launch retailer app only (smoke / login assist pause) |
@@ -105,6 +109,7 @@ python -m grocery_latency run --retailer amazon --scenario task1_cart_checkout_c
 | `test_case_9` | **Test Case 9 / TASK 9**: TC8 + CS **Track package** → **Cancel all items** → View orders; stop after |
 | `test_case_walmart_1` | **Walmart TC1**: My Items → Fresh Produce → +Add×5 → cart record → Change delivery/address → Reserve → qty+ → checkout Continue → stop |
 | `test_case_walmart_2` | **Walmart TC2**: baskets **A–H** (scaled items×units) + same checkout path as TC1 |
+| `test_case_walmart_3` | **Walmart TC3**: TC1 path, but qty + on Checkout Item details (View) instead of Cart |
 | `task1_add_grocery_to_cart` | Amazon TASK 1: cold start → open master ASIN PDP → add to cart |
 | `task1_cart_checkout_cancel` | TASK 1 (ASIN) + Cart → **start recording** → checkout → place order → Path A cancel |
 

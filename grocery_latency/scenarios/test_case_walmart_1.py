@@ -94,11 +94,12 @@ FRESH_PRODUCE_STRATEGIES = (
     ),
 )
 
-# Walmart: name=stepper.mainButton, label="Add <product…>" (UI shows "+ Add").
-# Do NOT require visible==1 — sticky department chips often mark on-screen
-# Add buttons as visible=false while still tappable via coordinates.
+# Walmart: unused +Add is often name=stepper.addToCartButton (Other, visible=false);
+# after first use it becomes Button stepper.mainButton label="Add …".
+# Do NOT require visible==1 — chips often mark on-screen Adds as visible=false.
 ADD_BUTTON_PREDICATE = (
-    'type == "XCUIElementTypeButton" AND name == "stepper.mainButton"'
+    '(type == "XCUIElementTypeButton" AND name == "stepper.mainButton") OR '
+    'name == "stepper.addToCartButton"'
 )
 
 CART_ICON_STRATEGIES = (
@@ -115,6 +116,294 @@ CART_ICON_STRATEGIES = (
         'label CONTAINS[c] "cart" OR name CONTAINS[c] "cart"`]',
     ),
 )
+
+
+def _cart_screen_visible(driver) -> bool:
+    """True when Cart page chrome is on screen (not header cart icon alone).
+
+    Header cart badge labels look like
+    'Your cart contains N items. The estimated total is $…' — never treat those
+    as Cart page chrome (they match naive 'Estimated total' / 'Cart (' contains).
+    """
+    try:
+        els = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'visible == 1 AND ('
+            'label == "Continue to checkout" OR name == "Continue to checkout" OR '
+            'label CONTAINS[c] "Continue to checkout" OR '
+            'label == "Estimated total" OR name == "Estimated total" OR '
+            'label BEGINSWITH[c] "Estimated total" OR '
+            'label == "Pickup and delivery" OR '
+            'label CONTAINS[c] "Pickup and delivery options" OR '
+            'name == "FulfillmentSummaryView.actionButton" OR '
+            'label CONTAINS[c] "Change delivery" OR '
+            'label == "Reservation expired" OR '
+            'label CONTAINS[c] "Reservation expired" OR '
+            'label == "Delivery from store" OR '
+            'label CONTAINS[c] "Delivery from store" OR '
+            'name == "CartPrimaryCTAButton")',
+        )
+        if els:
+            # Exclude the top-right header cart VoiceOver summary button.
+            for el in els[:12]:
+                try:
+                    lab = (el.get_attribute("label") or "").lower()
+                    if "your cart contains" in lab:
+                        continue
+                    r = el.rect or {}
+                    y = float(r.get("y", 0))
+                    # Real cart CTAs / totals sit below the status+nav chrome.
+                    if y < 90 and "continue to checkout" not in lab:
+                        continue
+                    return True
+                except Exception:  # noqa: BLE001
+                    continue
+        # Overlay / heavy carts: match without visible==1; still skip header badge.
+        els2 = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            '('
+            'label == "Continue to checkout" OR name == "Continue to checkout" OR '
+            'label CONTAINS[c] "Continue to checkout" OR '
+            'label == "Estimated total" OR name == "Estimated total" OR '
+            'label BEGINSWITH[c] "Estimated total" OR '
+            'label CONTAINS[c] "Reservation expired" OR '
+            'label CONTAINS[c] "Delivery from store" OR '
+            'name == "CartPrimaryCTAButton" OR '
+            'name == "FulfillmentSummaryView.actionButton" OR '
+            '(type == "XCUIElementTypeStaticText" AND label CONTAINS[c] "Cart (")'
+            ') AND NOT (label CONTAINS[c] "Your cart contains")',
+        )
+        return bool(els2)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _wait_cart_screen(driver, timeout: float = 8.0) -> bool:
+    """Poll for cart chrome — large carts can take seconds to expose a11y nodes."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _cart_screen_visible(driver):
+            return True
+        time.sleep(0.35)
+    return _cart_screen_visible(driver)
+
+
+def _header_cart_icon_present(driver) -> bool:
+    """True when a top-right header cart control is still findable (not on Cart)."""
+    try:
+        size = driver.get_window_size() or {}
+        w = float(size.get("width") or 390)
+        h = float(size.get("height") or 844)
+    except Exception:  # noqa: BLE001
+        w, h = 390.0, 844.0
+    try:
+        els = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND visible == 1 AND '
+            '(label CONTAINS[c] "cart" OR name CONTAINS[c] "cart" OR '
+            'label CONTAINS[c] "Cart" OR name CONTAINS[c] "Cart")',
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    for el in els[:20]:
+        try:
+            low = (
+                f"{el.get_attribute('label') or ''} "
+                f"{el.get_attribute('name') or ''}"
+            ).lower()
+            if "add to cart" in low or "add to" in low:
+                continue
+            r = el.rect or {}
+            x = float(r.get("x", 0))
+            y = float(r.get("y", 0))
+            ww = float(r.get("width", 0))
+            if y > h * 0.22 or y < 8:
+                continue
+            if x + ww / 2.0 < w * 0.55:
+                continue
+            return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+def _my_items_add_visible(driver) -> bool:
+    """True when My Items listing Add steppers are still on screen."""
+    try:
+        els = driver.find_elements(AppiumBy.IOS_PREDICATE, ADD_BUTTON_PREDICATE)
+        return bool(els)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _cart_likely_open_soft(driver) -> bool:
+    """Soft confirm when a11y tree is sparse but Cart UI is almost certainly open.
+
+    Heavy carts (e.g. 50 lines) often render visually while page_source stays a
+    shallow Shop/Cart/Search shell — find_elements then miss Cart chrome.
+    On Cart, the header cart icon is gone and My Items Add buttons are gone.
+    Avoid page_source here — full dumps can hang WDA on large carts.
+    """
+    if _cart_screen_visible(driver):
+        return True
+    if _my_items_add_visible(driver):
+        return False
+    if _header_cart_icon_present(driver):
+        return False
+    return True
+
+
+def _close_reserve_sheet_quick(
+    driver, markers: MarkerLog | None = None
+) -> bool:
+    """Close Reserve a time sheet if it is covering Cart."""
+    try:
+        els = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'visible == 1 AND ('
+            'label == "Reserve a time" OR name == "Reserve a time")',
+        )
+        if not els:
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    for by, value in (
+        (AppiumBy.ACCESSIBILITY_ID, "close"),
+        (AppiumBy.ACCESSIBILITY_ID, "Close"),
+        (
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND visible == 1 AND '
+            '(label == "close" OR name == "close" OR label == "Close" OR '
+            'name == "Close")',
+        ),
+    ):
+        try:
+            el, _, _ = find_first(driver, ((by, value),), timeout=1.0)
+            el.click()
+            if markers is not None:
+                markers.mark("reserve_sheet_closed_for_cart", by=by, value=value)
+            print("  closed Reserve a time sheet (over Cart)")
+            time.sleep(_MED)
+            return True
+        except TimeoutError:
+            continue
+    try:
+        size = driver.get_window_size() or {}
+        w = float(size.get("width") or 390)
+        _tap_center(driver, w * 0.92, 120.0)
+        if markers is not None:
+            markers.mark("reserve_sheet_closed_for_cart", via="coord")
+        print("  closed Reserve a time sheet (coord)")
+        time.sleep(_MED)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _walmart_pdp_visible(driver) -> bool:
+    """True on a product detail page (mis-tap from My Items Add)."""
+    try:
+        els = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'visible == 1 AND ('
+            'label CONTAINS[c] "Overall pick" OR '
+            'label CONTAINS[c] "bought since yesterday" OR '
+            'label CONTAINS[c] "About this item" OR '
+            'label CONTAINS[c] "Customer reviews" OR '
+            'label CONTAINS[c] "Add to registry" OR '
+            'label CONTAINS[c] "How do you want your items")',
+        )
+        return bool(els)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _dismiss_walmart_pdp_if_shown(
+    driver, markers: MarkerLog | None = None
+) -> bool:
+    if not _walmart_pdp_visible(driver):
+        return False
+    for by, value in (
+        (AppiumBy.ACCESSIBILITY_ID, "Back"),
+        (
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND visible == 1 AND '
+            '(label == "Back" OR name == "Back" OR '
+            'label CONTAINS[c] "Back" OR name CONTAINS[c] "back")',
+        ),
+        (
+            AppiumBy.IOS_CLASS_CHAIN,
+            '**/XCUIElementTypeNavigationBar/**/XCUIElementTypeButton[1]',
+        ),
+    ):
+        try:
+            el, _, _ = find_first(driver, ((by, value),), timeout=1.0)
+            el.click()
+            if markers is not None:
+                markers.mark("walmart_pdp_dismissed", by=by, value=value)
+            print("  PDP → Back (dismissed)")
+            time.sleep(_MED)
+            return True
+        except TimeoutError:
+            continue
+    try:
+        size = driver.get_window_size() or {}
+        w = float(size.get("width") or 390)
+        _tap_center(driver, w * 0.07, 56.0)
+        if markers is not None:
+            markers.mark("walmart_pdp_dismissed", via="coord")
+        print("  PDP → Back coord (dismissed)")
+        time.sleep(_MED)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _tap_header_cart_icon(driver) -> tuple[object, str, str]:
+    """Prefer the top-right header cart (avoid matching 'Add to cart' / PDP)."""
+    try:
+        size = driver.get_window_size() or {}
+        w = float(size.get("width") or 390)
+        h = float(size.get("height") or 844)
+    except Exception:  # noqa: BLE001
+        w, h = 390.0, 844.0
+    candidates: list[tuple[float, float, object, str]] = []
+    try:
+        els = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND visible == 1 AND '
+            '(label CONTAINS[c] "cart" OR name CONTAINS[c] "cart" OR '
+            'label CONTAINS[c] "Cart" OR name CONTAINS[c] "Cart")',
+        )
+    except Exception:  # noqa: BLE001
+        els = []
+    for el in els[:20]:
+        try:
+            label = (el.get_attribute("label") or el.get_attribute("name") or "")[
+                :80
+            ]
+            low = label.lower()
+            # Skip PDP / listing add CTAs.
+            if "add to cart" in low or "add to" in low:
+                continue
+            r = el.rect or {}
+            x = float(r.get("x", 0))
+            y = float(r.get("y", 0))
+            ww = float(r.get("width", 0))
+            # Header cart sits top-right; reject bottom tab bar.
+            if y > h * 0.22 or y < 8:
+                continue
+            if x + ww / 2.0 < w * 0.55:
+                continue
+            candidates.append((y, -(x + ww / 2.0), el, label))
+        except Exception:  # noqa: BLE001
+            continue
+    if candidates:
+        candidates.sort(key=lambda t: (t[0], t[1]))
+        _y, _nx, el, label = candidates[0]
+        return el, AppiumBy.IOS_PREDICATE, f"header_cart:{label}"
+    el, by, value = find_first(driver, CART_ICON_STRATEGIES, timeout=2.5)
+    return el, by, value
 
 CHANGE_LINK_STRATEGIES = (
     (AppiumBy.ACCESSIBILITY_ID, "Change"),
@@ -189,7 +478,10 @@ def _apply_fast_wda_settings(driver) -> None:
                 "waitForIdleTimeout": 0,
                 "animationCoolOffTimeout": 0,
                 "waitForQuiescence": False,
-                "snapshotMaxDepth": 50,
+                # Deep trees on 50-line carts can hang WDA forever; keep shallow.
+                "snapshotMaxDepth": 28,
+                # Fail snapshot waits instead of hanging indefinitely on fat carts.
+                "customSnapshotTimeout": 12,
             }
         )
         print("  WDA fast settings: waitForIdleTimeout=0, animationCoolOffTimeout=0")
@@ -215,15 +507,25 @@ def _scroll_down(driver, *, percent: float = 0.45) -> None:
         pass
 
 
-def _add_fingerprint(el) -> str:
+def _add_fingerprint(el, *, gen: int = 0) -> str:
     try:
         label = (el.get_attribute("label") or el.get_attribute("name") or "").strip()
+        name = (el.get_attribute("name") or "").strip()
         # Prefer stable product identity over screen coordinates.
         if label.lower().startswith("add "):
             return f"add:{label.lower()[:90]}"
         if "quantity" in label.lower():
             return f"qty:{label.lower()[:90]}"
         r = el.rect or {}
+        # Empty-label addToCartButton reuses the same x/y after every scroll for
+        # *different* products — include scroll gen so rows stay tappable.
+        if name == "stepper.addToCartButton" and (
+            not label or label == name or label.lower() == "add"
+        ):
+            return (
+                f"addToCart:{int(r.get('x', 0))}:"
+                f"{int(r.get('y', 0))}:g{gen}"
+            )
         return f"{label[:40]}:{int(r.get('x', 0))}:{int(r.get('y', 0))}"
     except Exception:  # noqa: BLE001
         return f"el:{id(el)}"
@@ -503,7 +805,9 @@ def _tap_fresh_produce(driver, markers: MarkerLog, outcome: dict) -> None:
         time.sleep(_FAST)
 
 
-def _collect_add_buttons(driver, used: set[str]) -> list[tuple]:
+def _collect_add_buttons(
+    driver, used: set[str], *, gen: int = 0
+) -> list[tuple]:
     batch: list[tuple] = []
     try:
         els = driver.find_elements(AppiumBy.IOS_PREDICATE, ADD_BUTTON_PREDICATE)
@@ -512,8 +816,10 @@ def _collect_add_buttons(driver, used: set[str]) -> list[tuple]:
     try:
         size = driver.get_window_size() or {}
         h = float(size.get("height") or 844)
+        w_screen = float(size.get("width") or 390)
     except Exception:  # noqa: BLE001
         h = 844.0
+        w_screen = 390.0
     for el in els[:40]:
         try:
             label = (el.get_attribute("label") or "").strip()
@@ -524,12 +830,13 @@ def _collect_add_buttons(driver, used: set[str]) -> list[tuple]:
             if "current quantity" in label.lower() or "quantity is" in label.lower():
                 continue
             if label and not label.lower().startswith("add "):
-                # Still allow empty/odd labels on stepper.mainButton.
-                if name != "stepper.mainButton":
+                # Empty label on addToCartButton is normal; odd labels only OK
+                # on known stepper names.
+                if name not in ("stepper.mainButton", "stepper.addToCartButton"):
                     continue
-                if "add" not in label.lower():
+                if name == "stepper.mainButton" and "add" not in label.lower():
                     continue
-            fp = _add_fingerprint(el)
+            fp = _add_fingerprint(el, gen=gen)
             if fp in used:
                 continue
             r = el.rect or {}
@@ -545,6 +852,8 @@ def _collect_add_buttons(driver, used: set[str]) -> list[tuple]:
                 continue
             cx = x + w / 2.0
             cy = y + hh / 2.0
+            if cx < 8 or cx > w_screen - 8:
+                continue
             batch.append((el, fp, y, cx, cy, label or name))
         except Exception:  # noqa: BLE001
             continue
@@ -567,7 +876,7 @@ def _add_n_via_add_buttons(
     markers.mark("walmart_add_start", target=target)
 
     while len(added) < target and scrolls <= max_scrolls:
-        batch = _collect_add_buttons(driver, used)
+        batch = _collect_add_buttons(driver, used, gen=scrolls)
         if not batch:
             _scroll_down(driver, percent=0.26)
             scrolls += 1
@@ -673,16 +982,157 @@ def _cart_icon_looks_empty(driver) -> bool:
 def _open_cart(driver, markers: MarkerLog, outcome: dict) -> None:
     print("Step: open Cart screen …")
     _dismiss_ask_sparky_if_shown(driver, markers)
+    _dismiss_walmart_pdp_if_shown(driver, markers)
+    _close_reserve_sheet_quick(driver, markers)
     _dismiss_subscription_sheet(driver)
-    el, by, value = find_first(driver, CART_ICON_STRATEGIES, timeout=2.5)
-    el.click()
+    by = value = ""
+    for attempt in range(4):
+        _close_reserve_sheet_quick(driver, markers)
+        if _wait_cart_screen(driver, timeout=1.2):
+            break
+        _dismiss_walmart_pdp_if_shown(driver, markers)
+        try:
+            el, by, value = _tap_header_cart_icon(driver)
+            el.click()
+        except Exception as exc:  # noqa: BLE001
+            print(f"  cart icon tap failed: {exc}")
+            # Bottom-tab Cart (Shop/Cart chrome) when header cart is missing.
+            try:
+                el, by, value = find_first(
+                    driver,
+                    (
+                        (
+                            AppiumBy.IOS_PREDICATE,
+                            'type == "XCUIElementTypeButton" AND '
+                            '(label == "Cart" OR name == "Cart")',
+                        ),
+                        (AppiumBy.ACCESSIBILITY_ID, "Cart"),
+                    ),
+                    timeout=2.0,
+                )
+                el.click()
+                by, value = "bottom_tab", "Cart"
+            except Exception:  # noqa: BLE001
+                try:
+                    size = driver.get_window_size() or {}
+                    w = float(size.get("width") or 390)
+                    _tap_center(driver, w * 0.90, 56.0)
+                    by, value = "coord", "header_cart"
+                except Exception:  # noqa: BLE001
+                    pass
+        # Large baskets need longer for Cart a11y nodes to appear.
+        if _wait_cart_screen(driver, timeout=6.0):
+            break
+        _dismiss_subscription_sheet(driver)
+        # Ineligible-item carts often auto-open Reserve a time over Cart.
+        if _close_reserve_sheet_quick(driver, markers):
+            if _wait_cart_screen(driver, timeout=3.0):
+                break
+        if _cart_likely_open_soft(driver):
+            print(f"  cart soft-confirmed (sparse a11y; attempt {attempt + 1})")
+            break
+        if _dismiss_walmart_pdp_if_shown(driver, markers):
+            continue
+        print(f"  cart screen not confirmed (attempt {attempt + 1}/4)")
+    else:
+        if not _cart_screen_visible(driver) and not _cart_likely_open_soft(driver):
+            try:
+                size = driver.get_window_size() or {}
+                w = float(size.get("width") or 390)
+                _tap_center(driver, w * 0.90, 56.0)
+                by, value = "coord", "header_cart"
+                _wait_cart_screen(driver, timeout=5.0)
+                _close_reserve_sheet_quick(driver, markers)
+            except Exception:  # noqa: BLE001
+                pass
+    if not by:
+        by, value = "already_open", "cart_chrome"
+    confirmed = _cart_screen_visible(driver) or _cart_likely_open_soft(driver)
     outcome.setdefault("selectors", {})["cart"] = {"by": by, "value": value}
     outcome["cart_page_opened"] = True
-    markers.mark("cart_opened", by=by, value=value)
+    markers.mark("cart_opened", by=by, value=value, confirmed=confirmed)
     _mark_step(outcome, "cart_opened", status="ok", by=by, value=value)
-    print(f"  Cart: {by} = {value!r}")
-    time.sleep(_MED)
+    print(f"  Cart: {by} = {value!r} (visible={confirmed})")
+    time.sleep(_FAST)
     _dismiss_subscription_sheet(driver)
+    if not confirmed:
+        raise TimeoutError("Cart screen not confirmed after open attempts")
+
+
+def _collapse_cart_fulfillment_if_expanded(driver) -> bool:
+    """Collapse expanded Pickup/delivery block so cart line Remove controls load."""
+    try:
+        els = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'visible == 1 AND label CONTAINS[c] "Pickup and delivery" AND '
+            'label CONTAINS[c] "Expanded"',
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    if not els:
+        return False
+    try:
+        els[0].click()
+        time.sleep(0.35)
+        print("  collapsed Pickup and delivery options (expose Remove)")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _expand_cart_line_details(driver) -> bool:
+    """Expand collapsed cart card ('See details') so per-line Remove is exposed."""
+    try:
+        els = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND ('
+            'name == "CartCardExpandCollapseCellContainer.expandCollapse" OR '
+            'label == "See details" OR label CONTAINS[c] "See details")',
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    if not els:
+        return False
+    try:
+        els[0].click()
+        time.sleep(0.45)
+        print("  expanded cart line details (See details)")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _find_cart_remove_buttons(driver) -> list:
+    """Collect on-screen Cart line Remove controls (not 'Removed:' toasts)."""
+    try:
+        size = driver.get_window_size() or {}
+        h = float(size.get("height") or 844)
+    except Exception:  # noqa: BLE001
+        h = 844.0
+    try:
+        buttons = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND ('
+            'name CONTAINS[c] "CartItemTileActionsView.remove" OR '
+            'label BEGINSWITH[c] "Remove,")',
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for el in buttons[:16]:
+        try:
+            lab = (el.get_attribute("label") or "").lower()
+            if lab.startswith("removed"):
+                continue
+            r = el.rect or {}
+            y = float(r.get("y", 0))
+            ww = float(r.get("width", 0))
+            if y < 130 or y > h - 90 or ww < 12:
+                continue
+            out.append(el)
+        except Exception:  # noqa: BLE001
+            continue
+    return out
 
 
 def _clear_cart_items(driver, markers: MarkerLog, outcome: dict) -> None:
@@ -695,11 +1145,32 @@ def _clear_cart_items(driver, markers: MarkerLog, outcome: dict) -> None:
         return
 
     try:
-        find_first(driver, CART_ICON_STRATEGIES, timeout=2.5)[0].click()
-        time.sleep(_MED)
+        # Deep enough to expose Remove under cart cells; too deep hangs WDA.
+        driver.update_settings({"snapshotMaxDepth": 36})
     except Exception:  # noqa: BLE001
-        print("  cart icon not found — skip clear")
-        return
+        pass
+
+    # Prefer the hardened cart open (header / bottom tab / soft confirm).
+    try:
+        _open_cart(driver, markers, outcome)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  cart open for clear failed ({exc}); trying icon tap")
+        try:
+            find_first(driver, CART_ICON_STRATEGIES, timeout=2.5)[0].click()
+            time.sleep(0.5)
+        except Exception:  # noqa: BLE001
+            print("  cart icon not found — skip clear")
+            try:
+                driver.update_settings({"snapshotMaxDepth": 28})
+            except Exception:  # noqa: BLE001
+                pass
+            return
+
+    # Ineligible carts may auto-open Reserve over Cart — close so Remove is visible.
+    _close_reserve_sheet_quick(driver, markers)
+    _collapse_cart_fulfillment_if_expanded(driver)
+    # Collapsed cart card only shows thumbnails — expand for Remove controls.
+    _expand_cart_line_details(driver)
 
     # Empty cart title / CTA.
     try:
@@ -713,13 +1184,33 @@ def _clear_cart_items(driver, markers: MarkerLog, outcome: dict) -> None:
             markers.mark("cart_cleared", removed=0, skipped=True, reason="empty_cart_page")
             print("  cart page empty — skip remove")
             _return_to_my_items_fast(driver, markers)
+            try:
+                driver.update_settings({"snapshotMaxDepth": 28})
+            except Exception:  # noqa: BLE001
+                pass
             return
     except Exception:  # noqa: BLE001
         pass
 
+    # Large carts: collapsed card / fulfillment chrome hide Remove until expanded.
+    deadline = time.time() + 12.0
+    while time.time() < deadline and not _find_cart_remove_buttons(driver):
+        _collapse_cart_fulfillment_if_expanded(driver)
+        _expand_cart_line_details(driver)
+        _scroll_down(driver, percent=0.35)
+        time.sleep(0.35)
+
     removed = 0
     stagnant = 0
-    for _ in range(16):
+    clear_deadline = time.time() + 240.0  # hard cap — avoid WDA hangs on fat carts
+    for _ in range(120):
+        if time.time() > clear_deadline:
+            print("  clear time budget hit — stopping")
+            break
+        if _cart_icon_looks_empty(driver):
+            print("  cart badge empty — stop clear")
+            break
+        _close_reserve_sheet_quick(driver, markers)
         # "Unable to remove" sheets block further Remove taps.
         try:
             for label in ("Got it", "Got It", "OK", "Close"):
@@ -736,45 +1227,44 @@ def _clear_cart_items(driver, markers: MarkerLog, outcome: dict) -> None:
                         pass
         except Exception:  # noqa: BLE001
             pass
-        try:
-            buttons = driver.find_elements(
-                AppiumBy.IOS_PREDICATE,
-                'type == "XCUIElementTypeButton" AND '
-                '(name CONTAINS[c] "CartItemTileActionsView.remove" OR '
-                'label BEGINSWITH[c] "Remove,")',
-            )
-        except Exception:  # noqa: BLE001
-            buttons = []
+        buttons = _find_cart_remove_buttons(driver)
         # Tap every on-screen Remove in one pass (avoid re-query per item).
         tapped_this_pass = 0
-        for el in buttons[:10]:
+        for el in buttons[:6]:
             try:
                 r = el.rect or {}
                 y = float(r.get("y", 0))
                 x = float(r.get("x", 0))
                 ww = float(r.get("width", 0))
                 hh = float(r.get("height", 0))
-                if y < 160 or y > 820 or ww < 20:
-                    continue
                 _tap_center(driver, x + ww / 2.0, y + hh / 2.0)
                 removed += 1
                 tapped_this_pass += 1
-                time.sleep(0.05)
+                time.sleep(0.12)
             except Exception:  # noqa: BLE001
                 continue
         if tapped_this_pass == 0:
             stagnant += 1
-            if stagnant >= 2:
+            # Fat leftover carts need many scrolls; stop only when empty-looking.
+            if stagnant >= 10:
                 break
+            _expand_cart_line_details(driver)
             _scroll_down(driver, percent=0.40)
-            time.sleep(0.08)
+            time.sleep(0.2)
             continue
         stagnant = 0
+        if removed and removed % 10 == 0:
+            print(f"  … cleared {removed} so far")
         time.sleep(0.08)
 
     outcome["cart_items_cleared"] = removed
     markers.mark("cart_cleared", removed=removed)
     print(f"  cleared {removed} cart item(s)")
+    if removed == 0 and not _cart_icon_looks_empty(driver):
+        print(
+            "  WARNING: cart still looks non-empty after clear — "
+            "+ Add buttons may be missing on My Items"
+        )
     # Dismiss leftover error sheets before leaving cart.
     try:
         for label in ("Got it", "Got It", "OK", "Close"):
@@ -792,6 +1282,10 @@ def _clear_cart_items(driver, markers: MarkerLog, outcome: dict) -> None:
     except Exception:  # noqa: BLE001
         pass
     _return_to_my_items_fast(driver, markers)
+    try:
+        driver.update_settings({"snapshotMaxDepth": 28})
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _return_to_my_items_fast(driver, markers: MarkerLog) -> None:
@@ -912,9 +1406,46 @@ def _dismiss_subscription_sheet(driver) -> bool:
         return False
 
 
+def _find_cart_change_delivery_el(driver):
+    """Locate Change delivery control (often visible=false under sticky footer)."""
+    try:
+        els = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND ('
+            'name == "FulfillmentSummaryView.actionButton" OR '
+            'label == "Change delivery method or slot" OR '
+            'label CONTAINS[c] "Change delivery")',
+        )
+    except Exception:  # noqa: BLE001
+        els = []
+    try:
+        size = driver.get_window_size() or {}
+        h = float(size.get("height") or 844)
+    except Exception:  # noqa: BLE001
+        h = 844.0
+    best = None
+    best_y = 1e9
+    for el in els[:8]:
+        try:
+            r = el.rect or {}
+            y = float(r.get("y", 0))
+            # Prefer store-delivery Change in the mid band (above sticky CTA).
+            if y < 120 or y > h - 40:
+                continue
+            if y < best_y:
+                best, best_y = el, y
+        except Exception:  # noqa: BLE001
+            continue
+    return best
+
+
 def _tap_cart_change_delivery(driver, markers: MarkerLog, outcome: dict) -> None:
     print('Step: on Cart tap "Change" (delivery method or slot) …')
     _dismiss_subscription_sheet(driver)
+    _dismiss_walmart_pdp_if_shown(driver, markers)
+    if not _cart_screen_visible(driver):
+        print("  not on Cart — re-opening …")
+        _open_cart(driver, markers, outcome)
     try:
         for label in ("Got it", "Got It", "Close", "close", "Not Now"):
             els = driver.find_elements(
@@ -930,31 +1461,55 @@ def _tap_cart_change_delivery(driver, markers: MarkerLog, outcome: dict) -> None
                     pass
     except Exception:  # noqa: BLE001
         pass
-    strategies = (
-        (
-            AppiumBy.IOS_PREDICATE,
-            'type == "XCUIElementTypeButton" AND '
-            '(name == "FulfillmentSummaryView.actionButton" OR '
-            'label == "Change delivery method or slot" OR '
-            'label CONTAINS[c] "Change delivery")',
-        ),
-        (
-            AppiumBy.IOS_PREDICATE,
-            'type == "XCUIElementTypeButton" AND '
-            '(label == "Change" OR name == "Change")',
-        ),
-    )
+    # Fat carts bury Change under shipping + sticky footer — collapse + scroll.
+    _collapse_cart_fulfillment_if_expanded(driver)
+    el = None
+    by = AppiumBy.IOS_PREDICATE
+    value = "FulfillmentSummaryView.actionButton"
     try:
-        el, by, value = find_first(driver, strategies, timeout=4.0)
-    except TimeoutError:
-        _dismiss_subscription_sheet(driver)
-        # May still be on My Items — open cart again.
+        size = driver.get_window_size() or {}
+        h = float(size.get("height") or 844)
+    except Exception:  # noqa: BLE001
+        h = 844.0
+    for attempt in range(8):
+        el = _find_cart_change_delivery_el(driver)
+        if el is not None:
+            r = el.rect or {}
+            y = float(r.get("y", 0))
+            if 140 <= y <= h * 0.72:
+                break
+            # Too low (under sticky CTA) — nudge content up.
+            _scroll_down(driver, percent=0.28)
+            time.sleep(0.25)
+            continue
+        _scroll_down(driver, percent=0.32)
+        time.sleep(0.25)
+    else:
+        el = _find_cart_change_delivery_el(driver)
+    if el is None:
+        strategies = (
+            (
+                AppiumBy.IOS_PREDICATE,
+                'type == "XCUIElementTypeButton" AND '
+                '(name == "FulfillmentSummaryView.actionButton" OR '
+                'label == "Change delivery method or slot" OR '
+                'label CONTAINS[c] "Change delivery")',
+            ),
+            (
+                AppiumBy.IOS_PREDICATE,
+                'type == "XCUIElementTypeButton" AND '
+                '(label == "Change" OR name == "Change")',
+            ),
+        )
         try:
-            find_first(driver, CART_ICON_STRATEGIES, timeout=1.5)[0].click()
-            time.sleep(_FAST)
-        except Exception:  # noqa: BLE001
-            pass
-        el, by, value = find_first(driver, strategies, timeout=3.5)
+            el, by, value = find_first(driver, strategies, timeout=4.0)
+        except TimeoutError:
+            _dismiss_subscription_sheet(driver)
+            try:
+                _open_cart(driver, markers, outcome)
+            except Exception:  # noqa: BLE001
+                pass
+            el, by, value = find_first(driver, strategies, timeout=5.0)
     r = el.rect or {}
     y = float(r.get("y", 0))
     try:

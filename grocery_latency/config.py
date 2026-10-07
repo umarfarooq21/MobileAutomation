@@ -30,6 +30,7 @@ SCENARIOS = (
     "test_case_9",
     "test_case_walmart_1",
     "test_case_walmart_2",
+    "test_case_walmart_3",
     "task1_add_grocery_to_cart",
     "task1_cart_checkout_cancel",
 )
@@ -96,11 +97,30 @@ def load_settings(env_file: Path | None = None) -> Settings:
         if example.exists():
             load_dotenv(example)
 
-    udid = os.getenv("DEVICE_UDID", "").strip()
-    ios = os.getenv("IOS_VERSION", "").strip()
+    # Prefer ACTIVE_DEVICE profile (iphone16 / iphone14); fall back to DEVICE_*.
+    active = (os.getenv("ACTIVE_DEVICE") or "").strip().lower()
+    profile_map = {
+        "iphone16": ("IPHONE16", "iPhone16"),
+        "iphone14": ("IPHONE14", "iPhone"),
+        "16": ("IPHONE16", "iPhone16"),
+        "14": ("IPHONE14", "iPhone"),
+    }
+    if active in profile_map:
+        prefix, default_name = profile_map[active]
+        udid = os.getenv(f"{prefix}_UDID", "").strip()
+        ios = os.getenv(f"{prefix}_IOS_VERSION", "").strip()
+        device_name = (
+            os.getenv(f"{prefix}_DEVICE_NAME", "").strip()
+            or default_name
+        )
+    else:
+        udid = os.getenv("DEVICE_UDID", "").strip()
+        ios = os.getenv("IOS_VERSION", "").strip()
+        device_name = os.getenv("DEVICE_NAME", "iPhone").strip() or "iPhone"
     if not udid or not ios:
         raise SystemExit(
-            "DEVICE_UDID and IOS_VERSION must be set in .env (see .env.example)."
+            "Set ACTIVE_DEVICE=iphone16|iphone14 (with IPHONE16_*/IPHONE14_* "
+            "in .env) or DEVICE_UDID + IOS_VERSION (see .env.example)."
         )
 
     asin_file = (os.getenv("AMAZON_ASIN_LIST_FILE") or "").strip()
@@ -118,7 +138,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
     return Settings(
         device_udid=udid,
         ios_version=ios,
-        device_name=os.getenv("DEVICE_NAME", "iPhone").strip() or "iPhone",
+        device_name=device_name,
         appium_url=os.getenv("APPIUM_URL", "http://127.0.0.1:4723").strip(),
         new_command_timeout=int(os.getenv("NEW_COMMAND_TIMEOUT", "300")),
         wda_launch_timeout=int(os.getenv("WDA_LAUNCH_TIMEOUT", "120000")),

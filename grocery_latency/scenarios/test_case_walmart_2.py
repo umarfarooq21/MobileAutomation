@@ -308,7 +308,13 @@ def _tap_all_items_filter(driver, markers: MarkerLog) -> bool:
         ),
         (
             AppiumBy.IOS_PREDICATE,
-            'visible == 1 AND (label == "All Items" OR name == "All Items")',
+            'visible == 1 AND (label == "All Items" OR name == "All Items" OR '
+            'label CONTAINS[c] "All Items")',
+        ),
+        # Chip label is often "All Items, department." without Cell wrapper.
+        (
+            AppiumBy.IOS_PREDICATE,
+            'label CONTAINS[c] "All Items" OR name CONTAINS[c] "All Items"',
         ),
     )
     try:
@@ -407,7 +413,7 @@ def _add_basket_via_add_buttons(
     while len(added) < target and scrolls <= max_scrolls:
         _dismiss_add_blockers(driver)
         _dismiss_subscription_sheet(driver)
-        batch = _collect_add_buttons(driver, used)
+        batch = _collect_add_buttons(driver, used, gen=scrolls)
         if not batch:
             stagnant_rounds += 1
             if stagnant_rounds >= 3 and not widened_filter:
