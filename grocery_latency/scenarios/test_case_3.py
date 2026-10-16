@@ -1180,83 +1180,137 @@ def _tap_no_thanks(driver, markers: MarkerLog, outcome: dict) -> None:
     time.sleep(0.6)
 
 
+def _payment_row_selected(png: bytes, scale: float, row_y: float) -> bool | None:
+    """Amazon marks the chosen card with a light-blue tile (white otherwise)
+    — the a11y tree gives both rows the same value. Sample under the card
+    icon (x≈60 pt, ~70 pt below the card name)."""
+    try:
+        import io as _io
+
+        from PIL import Image as _Image
+
+        img = _Image.open(_io.BytesIO(png)).convert("RGB")
+        x0, y0 = int(52 * scale), int((row_y + 62) * scale)
+        px = [img.getpixel((x, y)) for x in range(x0, x0 + int(16 * scale), 3)
+              for y in range(y0, y0 + int(16 * scale), 3)]
+        r = sum(p[0] for p in px) / len(px)
+        b = sum(p[2] for p in px) / len(px)
+        return (b - r) > 6 and r < 248
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _select_second_payment_card(driver, markers: MarkerLog, outcome: dict) -> None:
-    """On Select a payment method: tap 2nd saved card."""
-    print("Step: select 2nd payment card …")
+    """On Select a Payment Method: switch to the saved card that is NOT the
+    one currently selected (light-blue tile)."""
+    print("Step: select the other saved payment card …")
     time.sleep(0.35)
 
-    card_rows: list[tuple[float, object, str]] = []
+    # Saved cards are buttons like "Your Bank •••• 1234 …" / "Mastercard ••••
+    # 5678 …" — the bank name is not always a card brand, so match the digits.
+    rows: list[tuple[float, float, str]] = []
     try:
         els = driver.find_elements(
             AppiumBy.IOS_PREDICATE,
-            'label CONTAINS[c] "Visa" OR name CONTAINS[c] "Visa" OR '
-            'label CONTAINS[c] "Mastercard" OR name CONTAINS[c] "Mastercard" OR '
-            'label CONTAINS[c] "MasterCard" OR name CONTAINS[c] "MasterCard" OR '
-            'label CONTAINS[c] "American Express" OR '
-            'label CONTAINS[c] "ending in" OR name CONTAINS[c] "ending in"',
+            'type == "XCUIElementTypeButton" AND '
+            '(label CONTAINS "••••" OR label CONTAINS[c] "ending in")',
         )
     except Exception:  # noqa: BLE001
         els = []
-    for el in els:
+    for el in els[:10]:
         try:
-            if not el.is_displayed():
-                continue
-            blob = element_textish(el)
-            if len(blob) < 4:
-                continue
+            blob = (el.get_attribute("label") or "").strip()
             low = blob.lower()
-            if "affirm" in low or "ineligible" in low or "gift card" in low:
+            # Never a card: Affirm, gift cards and card OFFERS ("Get a $50
+            # Amazon Gift Card upon approval for Amazon Visa" opens the Visa
+            # application page).
+            if any(k in low for k in ("affirm", "ineligible", "gift card",
+                                      "upon approval", "apply", "add new",
+                                      "promo", "offer")):
                 continue
-            y = float(el.location.get("y", 0))
+            r = el.rect or {}
+            y = float(r.get("y", 0))
             if y < 100:
                 continue
-            card_rows.append((y, el, blob[:80]))
+            rows.append((y, float(r.get("x", 0)) + float(r.get("width", 0)) / 2.0, blob))
         except Exception:  # noqa: BLE001
             continue
-
-    card_rows.sort(key=lambda t: t[0])
-    deduped: list[tuple[float, object, str]] = []
-    for row in card_rows:
+    rows.sort(key=lambda t: t[0])
+    deduped: list[tuple[float, float, str]] = []
+    for row in rows:
         if deduped and abs(row[0] - deduped[-1][0]) < 28:
             continue
         deduped.append(row)
+    if len(deduped) < 2:
+        raise AssertionError(
+            f"Could not find 2nd payment card (card_rows={len(deduped)}, radios=0)"
+        )
 
-    if len(deduped) >= 2:
-        _y, el, blob = deduped[1]
-        print(f"  Tapping 2nd payment card: {blob!r}")
-        el.click()
-        markers.mark("second_payment_card_tapped", text=blob)
-        _mark_step(outcome, "second_payment_card", status="ok", text=blob)
-        outcome["second_payment_card_tapped"] = True
-        time.sleep(0.4)
-        return
-
-    radios: list[tuple[float, object]] = []
+    pick = None
     try:
-        for el in driver.find_elements(
-            AppiumBy.IOS_PREDICATE, 'type == "XCUIElementTypeRadioButton"'
-        ):
-            if not el.is_displayed():
-                continue
-            y = float(el.location.get("y", 0))
-            if y < 100:
-                continue
-            radios.append((y, el))
-    except Exception:  # noqa: BLE001
-        radios = []
-    if len(radios) >= 2:
-        radios.sort(key=lambda t: t[0])
-        radios[1][1].click()
-        markers.mark("second_payment_radio_tapped", radio_count=len(radios))
-        _mark_step(outcome, "second_payment_card", status="ok", via="radio")
-        outcome["second_payment_card_tapped"] = True
-        time.sleep(0.4)
-        return
+        png = driver.get_screenshot_as_png()
+        w = float((driver.get_window_size() or {}).get("width") or 390)
+        from PIL import Image as _Image
+        import io as _io
 
-    raise AssertionError(
-        f"Could not find 2nd payment card "
-        f"(card_rows={len(deduped)}, radios={len(radios)})"
-    )
+        scale = _Image.open(_io.BytesIO(png)).size[0] / w
+        sel = [_payment_row_selected(png, scale, y) for y, _x, _b in deduped]
+        print(f"  saved cards: {[b[:28] for _y, _x, b in deduped]} selected={sel}")
+        if sel.count(True) == 1:
+            pick = next(row for row, on in zip(deduped, sel) if not on)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  selected-card check failed: {exc}")
+    if pick is None:
+        pick = deduped[1]  # can't tell which is selected: the 2nd card
+    y, x, blob = pick
+    print(f"  Tapping payment card: {blob[:60]!r}")
+    _tap_xy_card = getattr(driver, "execute_script")
+    _tap_xy_card("mobile: tap", {"x": x, "y": y + 10})
+    markers.mark("second_payment_card_tapped", text=blob[:80])
+    _mark_step(outcome, "second_payment_card", status="ok", text=blob[:80])
+    outcome["second_payment_card_tapped"] = True
+    outcome["payment_card_selected"] = blob[:80]
+    time.sleep(0.6)
+
+
+def _tap_payment_continue(driver) -> bool:
+    """The picker has two "Continue" buttons: one sticky under the nav bar
+    (often half hidden) and one at the bottom. Tap whichever shows enough."""
+    try:
+        h = float((driver.get_window_size() or {}).get("height") or 844)
+    except Exception:  # noqa: BLE001
+        h = 844.0
+    for _ in range(3):
+        try:
+            btns = driver.find_elements(
+                AppiumBy.IOS_PREDICATE,
+                'type == "XCUIElementTypeButton" AND (name == "Continue" OR label == "Continue")',
+            )
+        except Exception:  # noqa: BLE001
+            btns = []
+        for el in btns[:4]:
+            try:
+                r = el.rect or {}
+                top = max(float(r.get("y", 0)), 104.0)
+                bot = min(float(r.get("y", 0)) + float(r.get("height", 0)), h - 40)
+                if bot - top >= 12:
+                    driver.execute_script("mobile: tap", {
+                        "x": float(r.get("x", 0)) + float(r.get("width", 0)) / 2.0,
+                        "y": (top + bot) / 2.0,
+                    })
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+        # Neither on screen: scroll back to the top (sticky Continue).
+        try:
+            driver.execute_script("mobile: dragFromToWithVelocity", {
+                "fromX": 195, "fromY": h * 0.35, "toX": 195, "toY": h * 0.85,
+                "velocity": 900, "pressDuration": 0.1, "holdDuration": 0.1,
+            })
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.6)
+    return False
 
 
 def _handle_payment_screen(driver, markers: MarkerLog, outcome: dict) -> None:
@@ -1268,7 +1322,10 @@ def _handle_payment_screen(driver, markers: MarkerLog, outcome: dict) -> None:
     _select_second_payment_card(driver, markers, outcome)
 
     print('Step: tap "Continue" …')
-    cont = _fast_scroll_find_tap(driver, CONTINUE_BTN, scrolls=1, timeout=1.5)
+    if _tap_payment_continue(driver):
+        cont = ("position", "Continue")
+    else:
+        cont = _fast_scroll_find_tap(driver, CONTINUE_BTN, scrolls=1, timeout=1.5)
     if not cont:
         raise AssertionError('"Continue" not found on payment method screen')
     markers.mark("payment_continue_tapped", by=cont[0], value=cont[1])

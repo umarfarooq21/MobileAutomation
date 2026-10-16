@@ -126,6 +126,26 @@ def _cart_screen_visible(driver) -> bool:
     as Cart page chrome (they match naive 'Estimated total' / 'Cart (' contains).
     """
     try:
+        # Empty-cart page has no checkout CTA — still a real Cart screen.
+        empty = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'label CONTAINS[c] "Your cart is empty" OR '
+            'name CONTAINS[c] "Your cart is empty" OR '
+            'label == "Start shopping" OR name == "Start shopping"',
+        )
+        for el in empty[:6]:
+            try:
+                lab = (el.get_attribute("label") or "").lower()
+                r = el.rect or {}
+                y = float(r.get("y", 0))
+                if "your cart contains" in lab:
+                    continue
+                if "empty" in lab and y > 120:
+                    return True
+                if lab == "start shopping" and 200 < y < 700:
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
         els = driver.find_elements(
             AppiumBy.IOS_PREDICATE,
             'visible == 1 AND ('
@@ -246,6 +266,17 @@ def _cart_likely_open_soft(driver) -> bool:
     """
     if _cart_screen_visible(driver):
         return True
+    # Empty-cart essentials row still has + Add — don't treat that as listing.
+    try:
+        empty = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'label CONTAINS[c] "Your cart is empty" OR '
+            'name CONTAINS[c] "Your cart is empty"',
+        )
+        if empty[:1]:
+            return True
+    except Exception:  # noqa: BLE001
+        pass
     if _my_items_add_visible(driver):
         return False
     if _header_cart_icon_present(driver):
@@ -907,6 +938,32 @@ def _add_n_via_add_buttons(
                     continue
             used.add(fp)
             time.sleep(_FAST)
+            # Skip products blocked by "Unable to add to cart".
+            try:
+                blocked = driver.find_elements(
+                    AppiumBy.IOS_PREDICATE,
+                    'label CONTAINS[c] "Unable to add" OR '
+                    'name CONTAINS[c] "Unable to add"',
+                )
+                if blocked[:1]:
+                    for lab in ("Got it", "Got It", "Close"):
+                        try:
+                            btns = driver.find_elements(
+                                AppiumBy.IOS_PREDICATE,
+                                f'label == "{lab}" OR name == "{lab}"',
+                            )
+                            for b in btns[:2]:
+                                b.click()
+                                time.sleep(0.2)
+                                break
+                        except Exception:  # noqa: BLE001
+                            continue
+                    print("  Unable to add — skip product")
+                    markers.mark("unable_to_add_skip", label=label[:60])
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+            _dismiss_walmart_pdp_if_shown(driver, markers)
             entry = {
                 "index": len(added) + 1,
                 "source": "my_items_fresh_produce_add",
@@ -1135,6 +1192,130 @@ def _find_cart_remove_buttons(driver) -> list:
     return out
 
 
+def _unable_to_remove_sheet_visible(driver) -> bool:
+    try:
+        els = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'label CONTAINS[c] "Unable to remove" OR '
+            'name CONTAINS[c] "Unable to remove" OR '
+            'label CONTAINS[c] "technical issue removing" OR '
+            'name CONTAINS[c] "technical issue removing"',
+        )
+        return bool(els[:1])
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _dismiss_unable_to_remove_sheet(driver, markers: MarkerLog | None = None) -> bool:
+    """Dismiss 'Unable to remove' modal (blocks further Remove taps)."""
+    if not _unable_to_remove_sheet_visible(driver):
+        return False
+    dismissed = False
+    # Prefer label match without type/visible filters — Walmart sheets vary.
+    for by, value in (
+        (
+            AppiumBy.IOS_PREDICATE,
+            'label == "Got it" OR name == "Got it" OR '
+            'label == "Got It" OR name == "Got It"',
+        ),
+        (AppiumBy.ACCESSIBILITY_ID, "Got it"),
+        (
+            AppiumBy.IOS_CLASS_CHAIN,
+            '**/XCUIElementTypeButton[`label == "Got it" OR name == "Got it"`]',
+        ),
+    ):
+        try:
+            el, _, _ = find_first(driver, ((by, value),), timeout=0.9)
+            try:
+                el.click()
+            except Exception:  # noqa: BLE001
+                r = el.rect or {}
+                _tap_center(
+                    driver,
+                    float(r.get("x", 0)) + float(r.get("width", 0)) / 2.0,
+                    float(r.get("y", 0)) + float(r.get("height", 0)) / 2.0,
+                )
+            dismissed = True
+            if markers is not None:
+                markers.mark("unable_to_remove_got_it", by=str(by), value=value)
+            print('  "Unable to remove" → Got it')
+            time.sleep(0.35)
+            break
+        except TimeoutError:
+            continue
+        except Exception:  # noqa: BLE001
+            continue
+    if not dismissed:
+        # Blue "Got it" sits mid-lower on the centered modal.
+        try:
+            size = driver.get_window_size() or {}
+            w = float(size.get("width") or 390)
+            h = float(size.get("height") or 844)
+            for yf in (0.60, 0.64, 0.56, 0.68):
+                _tap_center(driver, w * 0.50, h * yf)
+                time.sleep(0.15)
+                if not _unable_to_remove_sheet_visible(driver):
+                    dismissed = True
+                    break
+            if markers is not None:
+                markers.mark("unable_to_remove_got_it", via="coord")
+            print('  "Unable to remove" → Got it (coord)')
+            time.sleep(0.25)
+        except Exception:  # noqa: BLE001
+            pass
+    # X close on sheet if still up (top-right of modal).
+    if _unable_to_remove_sheet_visible(driver):
+        try:
+            els = driver.find_elements(
+                AppiumBy.IOS_PREDICATE,
+                'label == "Close" OR name == "Close" OR label == "close"',
+            )
+            for el in els[:3]:
+                try:
+                    r = el.rect or {}
+                    y = float(r.get("y", 0))
+                    # Modal X is mid-upper; skip nav-bar back.
+                    if y < 80 or y > 420:
+                        continue
+                    el.click()
+                    dismissed = True
+                    print('  "Unable to remove" → Close')
+                    time.sleep(0.25)
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception:  # noqa: BLE001
+            pass
+    return dismissed
+
+
+def _tap_save_for_later_on_cart(driver) -> bool:
+    """Move stuck unremovable lines out of cart via Save for later."""
+    try:
+        els = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND visible == 1 AND '
+            '(label CONTAINS[c] "Save for later" OR name CONTAINS[c] "Save for later")',
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    tapped = 0
+    for el in els[:4]:
+        try:
+            r = el.rect or {}
+            y = float(r.get("y", 0))
+            if y < 120:
+                continue
+            el.click()
+            tapped += 1
+            time.sleep(0.2)
+        except Exception:  # noqa: BLE001
+            continue
+    if tapped:
+        print(f"  Save for later ×{tapped} (skip unremovable)")
+    return tapped > 0
+
+
 def _clear_cart_items(driver, markers: MarkerLog, outcome: dict) -> None:
     """Remove existing cart lines so Fresh Produce shows blue + Add again."""
     print("Step: clear existing cart items (if any) …")
@@ -1202,60 +1383,82 @@ def _clear_cart_items(driver, markers: MarkerLog, outcome: dict) -> None:
 
     removed = 0
     stagnant = 0
-    clear_deadline = time.time() + 240.0  # hard cap — avoid WDA hangs on fat carts
-    for _ in range(120):
+    unable_streak = 0
+    # Fat leftover carts crash WDA if we Remove for minutes — Save-for-later first.
+    clear_deadline = time.time() + 45.0
+    prefer_save = True
+    for _ in range(50):
         if time.time() > clear_deadline:
             print("  clear time budget hit — stopping")
+            break
+        if removed >= 40:
+            print("  clear item cap hit — stopping")
             break
         if _cart_icon_looks_empty(driver):
             print("  cart badge empty — stop clear")
             break
         _close_reserve_sheet_quick(driver, markers)
-        # "Unable to remove" sheets block further Remove taps.
-        try:
-            for label in ("Got it", "Got It", "OK", "Close"):
-                els = driver.find_elements(
-                    AppiumBy.IOS_PREDICATE,
-                    f'type == "XCUIElementTypeButton" AND visible == 1 AND '
-                    f'(label == "{label}" OR name == "{label}")',
-                )
-                for el in els[:2]:
-                    try:
-                        el.click()
-                        time.sleep(0.15)
-                    except Exception:  # noqa: BLE001
-                        pass
-        except Exception:  # noqa: BLE001
-            pass
-        buttons = _find_cart_remove_buttons(driver)
-        # Tap every on-screen Remove in one pass (avoid re-query per item).
-        tapped_this_pass = 0
-        for el in buttons[:6]:
-            try:
-                r = el.rect or {}
-                y = float(r.get("y", 0))
-                x = float(r.get("x", 0))
-                ww = float(r.get("width", 0))
-                hh = float(r.get("height", 0))
-                _tap_center(driver, x + ww / 2.0, y + hh / 2.0)
+        # "Unable to remove" sheets block further Remove taps — dismiss, then
+        # Save-for-later / scroll past the bad line (do not re-Remove forever).
+        if _dismiss_unable_to_remove_sheet(driver, markers):
+            unable_streak += 1
+            prefer_save = True
+            if _tap_save_for_later_on_cart(driver):
                 removed += 1
-                tapped_this_pass += 1
-                time.sleep(0.12)
-            except Exception:  # noqa: BLE001
-                continue
+            _scroll_down(driver, percent=0.42)
+            time.sleep(0.15)
+            if unable_streak >= 4:
+                print("  too many Unable-to-remove — abort clear and leave Cart")
+                break
+            continue
+
+        tapped_this_pass = 0
+        # Save-for-later first: faster + avoids Walmart remove API failures.
+        if prefer_save and _tap_save_for_later_on_cart(driver):
+            removed += 1
+            tapped_this_pass += 1
+            time.sleep(0.08)
+        else:
+            buttons = _find_cart_remove_buttons(driver)
+            for el in buttons[:4]:
+                try:
+                    r = el.rect or {}
+                    y = float(r.get("y", 0))
+                    x = float(r.get("x", 0))
+                    ww = float(r.get("width", 0))
+                    hh = float(r.get("height", 0))
+                    _tap_center(driver, x + ww / 2.0, y + hh / 2.0)
+                    removed += 1
+                    tapped_this_pass += 1
+                    time.sleep(0.12)
+                    if _unable_to_remove_sheet_visible(driver):
+                        _dismiss_unable_to_remove_sheet(driver, markers)
+                        unable_streak += 1
+                        prefer_save = True
+                        _tap_save_for_later_on_cart(driver)
+                        _scroll_down(driver, percent=0.40)
+                        time.sleep(0.2)
+                        break
+                except Exception:  # noqa: BLE001
+                    continue
+
         if tapped_this_pass == 0:
             stagnant += 1
-            # Fat leftover carts need many scrolls; stop only when empty-looking.
-            if stagnant >= 10:
+            if stagnant >= 8:
                 break
+            _tap_save_for_later_on_cart(driver)
             _expand_cart_line_details(driver)
             _scroll_down(driver, percent=0.40)
-            time.sleep(0.2)
+            time.sleep(0.18)
+            # Alternate strategies when one path stalls.
+            prefer_save = not prefer_save
             continue
         stagnant = 0
+        if unable_streak and tapped_this_pass:
+            unable_streak = max(0, unable_streak - 1)
         if removed and removed % 10 == 0:
             print(f"  … cleared {removed} so far")
-        time.sleep(0.08)
+        time.sleep(0.06)
 
     outcome["cart_items_cleared"] = removed
     markers.mark("cart_cleared", removed=removed)
@@ -1266,11 +1469,12 @@ def _clear_cart_items(driver, markers: MarkerLog, outcome: dict) -> None:
             "+ Add buttons may be missing on My Items"
         )
     # Dismiss leftover error sheets before leaving cart.
+    _dismiss_unable_to_remove_sheet(driver, markers)
     try:
         for label in ("Got it", "Got It", "OK", "Close"):
             els = driver.find_elements(
                 AppiumBy.IOS_PREDICATE,
-                f'type == "XCUIElementTypeButton" AND visible == 1 AND '
+                f'type == "XCUIElementTypeButton" AND '
                 f'(label == "{label}" OR name == "{label}")',
             )
             for el in els[:2]:
@@ -1916,6 +2120,43 @@ def _wait_for_time_slots(
     return best
 
 
+def _tap_reserve_confirm(driver, *, timeout: float = 12.0) -> tuple[str, float] | None:
+    """Tap the bottom confirm on "Reserve a time" once it is enabled.
+
+    Old sheet: "Reserve". New full-page "Reserve a time" (Pickup/Delivery
+    tabs): "Continue" — greyed out while the slots reload after a tap.
+    Returns (label, y) or None.
+    """
+    pred = (
+        'type == "XCUIElementTypeButton" AND enabled == 1 AND '
+        '(name == "Reserve" OR label == "Reserve" OR '
+        'name == "Continue" OR label == "Continue")'
+    )
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        try:
+            els = driver.find_elements(AppiumBy.IOS_PREDICATE, pred)
+        except Exception:  # noqa: BLE001
+            els = []
+        for el in els[:4]:
+            try:
+                r = el.rect or {}
+                y = float(r.get("y", 0))
+                if y < 500:
+                    continue
+                label = el.get_attribute("label") or el.get_attribute("name") or ""
+                _tap_center(
+                    driver,
+                    float(r.get("x", 0)) + float(r.get("width", 0)) / 2.0,
+                    y + float(r.get("height", 0)) / 2.0,
+                )
+                return label, y
+            except Exception:  # noqa: BLE001
+                continue
+        time.sleep(0.4)
+    return None
+
+
 def _change_day_and_slot_then_reserve(
     driver, markers: MarkerLog, outcome: dict
 ) -> None:
@@ -2068,53 +2309,23 @@ def _change_day_and_slot_then_reserve(
         print(f"  delivery slot ({pick}) → coord @ ({slot_cx:.0f},{slot_cy:.0f})")
         time.sleep(_FAST)
 
-    reserved = False
-    try:
-        els = driver.find_elements(
-            AppiumBy.IOS_PREDICATE,
-            'type == "XCUIElementTypeButton" AND name == "Reserve"',
+    hit = _tap_reserve_confirm(driver, timeout=12.0)
+    if hit is None:
+        raise TimeoutError(
+            'Reserve a time: "Reserve"/"Continue" not enabled within 12s'
         )
-    except Exception:  # noqa: BLE001
-        els = []
-    for el in els[:3]:
-        try:
-            r = el.rect or {}
-            y = float(r.get("y", 0))
-            if y < 500:
-                continue
-            _tap_center(
-                driver,
-                float(r.get("x", 0)) + float(r.get("width", 0)) / 2.0,
-                float(r.get("y", 0)) + float(r.get("height", 0)) / 2.0,
-            )
-            reserved = True
-            markers.mark("reserve_tapped", y=y)
-            _mark_step(
-                outcome,
-                "reserve",
-                status="ok",
-                y=y,
-                day_changed=date_tapped,
-                slot_changed=slot_tapped,
-            )
-            print(f"  Reserve tapped @ y={y:.0f}")
-            break
-        except Exception:  # noqa: BLE001
-            continue
-    if not reserved:
-        el, by, value = find_first(driver, RESERVE_BUTTON_STRATEGIES, timeout=2.5)
-        el.click()
-        markers.mark("reserve_tapped", by=by, value=value)
-        _mark_step(
-            outcome,
-            "reserve",
-            status="ok",
-            by=by,
-            value=value,
-            day_changed=date_tapped,
-            slot_changed=slot_tapped,
-        )
-        print(f"  Reserve: {by} = {value!r}")
+    label, y = hit
+    markers.mark("reserve_tapped", y=y, label=label)
+    _mark_step(
+        outcome,
+        "reserve",
+        status="ok",
+        y=y,
+        label=label,
+        day_changed=date_tapped,
+        slot_changed=slot_tapped,
+    )
+    print(f"  {label or 'Reserve'} tapped @ y={y:.0f}")
     time.sleep(_MED)
     # Hot/ready items may block reservation — continue without them if sheet appears.
     _dismiss_ineligible_delivery_sheet(driver, markers, outcome)
@@ -2156,28 +2367,11 @@ def _recover_if_still_on_reserve_sheet(
         markers.mark("delivery_slot_eligible_retry", label=label)
         print(f"  eligible slot retry → {label!r}")
         time.sleep(_FAST)
-        try:
-            els = driver.find_elements(
-                AppiumBy.IOS_PREDICATE,
-                'type == "XCUIElementTypeButton" AND '
-                '(name == "Reserve" OR label == "Reserve")',
-            )
-            for el in els[:3]:
-                r = el.rect or {}
-                yb = float(r.get("y", 0))
-                if yb < 500:
-                    continue
-                _tap_center(
-                    driver,
-                    float(r.get("x", 0)) + float(r.get("width", 0)) / 2.0,
-                    float(r.get("y", 0)) + float(r.get("height", 0)) / 2.0,
-                )
-                markers.mark("reserve_tapped_eligible_retry", y=yb)
-                print(f"  Reserve (eligible retry) @ y={yb:.0f}")
-                time.sleep(_MED)
-                break
-        except Exception:  # noqa: BLE001
-            pass
+        hit = _tap_reserve_confirm(driver, timeout=8.0)
+        if hit is not None:
+            markers.mark("reserve_tapped_eligible_retry", y=hit[1], label=hit[0])
+            print(f"  {hit[0] or 'Reserve'} (eligible retry) @ y={hit[1]:.0f}")
+            time.sleep(_MED)
     _dismiss_ineligible_delivery_sheet(driver, markers, outcome)
     if not _reserve_sheet_visible(driver):
         return

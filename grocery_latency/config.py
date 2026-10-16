@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -31,6 +32,11 @@ SCENARIOS = (
     "test_case_walmart_1",
     "test_case_walmart_2",
     "test_case_walmart_3",
+    "test_case_walmart_4",
+    "test_case_walmart_5",
+    "test_case_walmart_6",
+    "test_case_amazon_final",  # file test_case_amazon_final.py (was test_case_7_2)
+    "test_case_wallmart_final",  # file test_case_wallmart_final.py (was test_case_walmart_6)
     "task1_add_grocery_to_cart",
     "task1_cart_checkout_cancel",
 )
@@ -147,7 +153,9 @@ def load_settings(env_file: Path | None = None) -> Settings:
         xcode_org_id=(os.getenv("XCODE_ORG_ID") or "").strip() or None,
         xcode_signing_id=(os.getenv("XCODE_SIGNING_ID") or "").strip() or None,
         updated_wda_bundle_id=(os.getenv("UPDATED_WDA_BUNDLE_ID") or "").strip() or None,
-        artifacts_dir=Path(os.getenv("ARTIFACTS_DIR", "artifacts")),
+        # One folder per day, e.g. artifacts/14-Oct-2026/ (videos, JSON, logs…).
+        artifacts_dir=Path(os.getenv("ARTIFACTS_DIR", "artifacts"))
+        / datetime.now().strftime("%d-%b-%Y"),
         login_pause_seconds=int(os.getenv("LOGIN_PAUSE_SECONDS", "90")),
         assigned_quantity=max(1, int(os.getenv("ASSIGNED_QUANTITY", "2"))),
         recording_time_limit_seconds=max(

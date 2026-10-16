@@ -42,9 +42,9 @@ python -m grocery_latency run --retailer amazon --scenario test_case_6 --dry-run
 python -m grocery_latency run --retailer amazon --scenario test_case_6
 python -m grocery_latency run --retailer amazon --scenario test_case_7 --dry-run
 python -m grocery_latency run --retailer amazon --scenario test_case_7
-python -m grocery_latency run --retailer amazon --scenario test_case_7_2 --dry-run
-python -m grocery_latency run --retailer amazon --scenario test_case_7_2 --basket-size A
-python -m grocery_latency run --retailer amazon --scenario test_case_7_2 --basket-size E
+python -m grocery_latency run --retailer amazon --scenario test_case_amazon_final --dry-run
+python -m grocery_latency run --retailer amazon --scenario test_case_amazon_final --basket-size A
+python -m grocery_latency run --retailer amazon --scenario test_case_amazon_final --basket-size E
 python -m grocery_latency run --retailer amazon --scenario test_case_8 --dry-run
 python -m grocery_latency run --retailer amazon --scenario test_case_8
 python -m grocery_latency run --retailer amazon --scenario test_case_9 --dry-run
@@ -60,6 +60,24 @@ python -m grocery_latency run --retailer walmart --scenario test_case_walmart_2 
 python -m grocery_latency run --retailer walmart --scenario test_case_walmart_2 --basket-size H
 python -m grocery_latency run --retailer walmart --scenario test_case_walmart_3 --dry-run
 python -m grocery_latency run --retailer walmart --scenario test_case_walmart_3
+python -m grocery_latency run --retailer walmart --scenario test_case_walmart_4 --dry-run
+python -m grocery_latency run --retailer walmart --scenario test_case_walmart_4
+python -m grocery_latency run --retailer walmart --scenario test_case_walmart_5 --dry-run
+python -m grocery_latency run --retailer walmart --scenario test_case_walmart_5 --basket-size A
+python -m grocery_latency run --retailer walmart --scenario test_case_walmart_5 --basket-size B
+python -m grocery_latency run --retailer walmart --scenario test_case_walmart_5 --basket-size C
+python -m grocery_latency run --retailer walmart --scenario test_case_walmart_5 --basket-size D
+python -m grocery_latency run --retailer walmart --scenario test_case_walmart_5 --basket-size E
+python -m grocery_latency run --retailer walmart --scenario test_case_walmart_5 --basket-size G
+python -m grocery_latency run --retailer walmart --scenario test_case_walmart_5 --basket-size H
+python -m grocery_latency run --retailer walmart --scenario test_case_wallmart_final --dry-run
+python -m grocery_latency run --retailer walmart --scenario test_case_wallmart_final --basket-size A
+python -m grocery_latency run --retailer walmart --scenario test_case_wallmart_final --basket-size B
+python -m grocery_latency run --retailer walmart --scenario test_case_wallmart_final --basket-size C
+python -m grocery_latency run --retailer walmart --scenario test_case_wallmart_final --basket-size D
+python -m grocery_latency run --retailer walmart --scenario test_case_wallmart_final --basket-size E
+python -m grocery_latency run --retailer walmart --scenario test_case_wallmart_final --basket-size G
+python -m grocery_latency run --retailer walmart --scenario test_case_wallmart_final --basket-size H
 python -m grocery_latency run --retailer amazon --scenario task1_add_grocery_to_cart --dry-run
 python -m grocery_latency run --retailer amazon --scenario task1_add_grocery_to_cart
 python -m grocery_latency run --retailer amazon --scenario task1_cart_checkout_cancel --dry-run
@@ -81,7 +99,7 @@ python -m grocery_latency run --retailer amazon --scenario task1_cart_checkout_c
 
 **Test Case 7** (`test_case_7` / TASK 7): Same as TC6, plus after Cart recording starts increase the **1st product** quantity by tapping **+** three times, then See more slots → last slot → payment + address. No place-order.
 
-**Test Case 7_2** (`test_case_7_2`): Scaled baskets **A–H** (items × units). Adds on Produce listing with rapid qty taps to minimize add time, then same TC6 checkout edits. Select with `--basket-size A|B|…|H` or `BASKET_SIZE`. Matrix: A 1×1, B 10×1, C 1×25, D 25×1, E 5×10, F 50×1, G 50×5, H 10×10. No place-order.
+**Test Case 7_2** (`test_case_amazon_final`, file `test_case_amazon_final.py`; old name `test_case_7_2` still works): Scaled baskets **A–H** (items × units). Adds on Produce listing with rapid qty taps to minimize add time, then same TC6 checkout edits. Select with `--basket-size A|B|…|H` or `BASKET_SIZE`. Matrix: A 1×1, B 10×1, C 1×25, D 25×1, E 5×10, F 50×1, G 50×5, H 10×10. No place-order.
 
 **Test Case 8** (`test_case_8` / TASK 8): Same as TC7, then on the final Place Your Order screen tap **Place your order**; stop recording only after order success confirmation.
 
@@ -92,6 +110,15 @@ python -m grocery_latency run --retailer amazon --scenario task1_cart_checkout_c
 **Test Case Walmart 2** (`test_case_walmart_2`): Same checkout path as Walmart TC1, but basket size follows study samples **A–H** (select with `--basket-size` / `BASKET_SIZE`): **A** 1×1, **B** 10×1, **C** 1×25, **D** 25×1, **E** 5×10, **F** 50×1, **G** 50×5, **H** 10×10. My Items uses **+ Add once** (qty 1); unit scaling is done on **Cart** (qty + on every line). Day/slot toggles last↔2nd-last. No place-order.
 
 **Test Case Walmart 3** (`test_case_walmart_3`): Same as Walmart TC2 through Checkout, but unit scaling is on **Checkout → Item details → View** (every line raised to `units_each`, then **Done**), not on the Cart screen. No place-order.
+
+**Test Case Walmart 4** (`test_case_walmart_4`): Same flow as Walmart TC3 (baskets A–H, qty + on Checkout Item details). Stays on **Fresh Produce** only. Basket **H** = **10** Fresh Produce items ×1, then each raised to **×10** on Item details (same as E, but 10 lines). No place-order.
+
+**Test Case Walmart 5** (`test_case_walmart_5`): Walmart → **My Items** → top search bar **"low cost products"** → **Add to cart** on results for baskets **A–E, G, H** (select with `--basket-size`): **A** 1×1, **B** 10×1, **C** 1×25, **D** 25×1, **E** 5×10, **G** 50×5, **H** 10×10 (units set with the listing **+** before recording) → **Cart** → **start recording** → **Change** → change day + time slot → **Reserve** → **Continue to checkout** → stop. No place-order.
+
+**Test Case Walmart 6** (`test_case_wallmart_final`, file `test_case_wallmart_final.py`; old name `test_case_walmart_6` still works): **Fast copy of Walmart TC5** — same flow and recorded window (My Items → search **"low cost products"** → baskets **A–E, G, H** → **Cart** → **start recording** → **Change** → day + slot → **Reserve** → **Continue to checkout** → stop). No place-order.
+
+- Speed-ups are all in the un-recorded basket fill: one trimmed `page_source` per step (popups detected from it), every visible Add on a screen tapped in **one W3C action chain**, every row's **+** taps in one chain, no-fling scroll so one snapshot is enough, header cart opened straight from the snapshot.
+- The result JSON adds `fill_summary` (snapshots, tap chains, scrolls, seconds per item), plus `phase_seconds` / `total_run_seconds` (also printed at the end of the run).
 
 | Scenario | What it does |
 | --- | --- |
@@ -104,12 +131,15 @@ python -m grocery_latency run --retailer amazon --scenario task1_cart_checkout_c
 | `test_case_5` | **Test Case 5 / TASK 5**: Grocery → Produce → +×5 → cart record → payment + address edits |
 | `test_case_6` | **Test Case 6 / TASK 6**: TC5 + See more delivery slots → last slot → payment + address |
 | `test_case_7` | **Test Case 7 / TASK 7**: TC6 + Cart 1st item qty **+3** after recording starts |
-| `test_case_7_2` | **Test Case 7_2**: Basket samples **A–H** (scaled items×units) + TC6 checkout |
+| `test_case_amazon_final` (alias `test_case_7_2`) | **Test Case 7_2**: Basket samples **A–H** (scaled items×units) + TC6 checkout |
 | `test_case_8` | **Test Case 8 / TASK 8**: TC7 + **Place your order**; stop recording after success |
 | `test_case_9` | **Test Case 9 / TASK 9**: TC8 + CS **Track package** → **Cancel all items** → View orders; stop after |
 | `test_case_walmart_1` | **Walmart TC1**: My Items → Fresh Produce → +Add×5 → cart record → Change delivery/address → Reserve → qty+ → checkout Continue → stop |
 | `test_case_walmart_2` | **Walmart TC2**: baskets **A–H** (scaled items×units) + same checkout path as TC1 |
 | `test_case_walmart_3` | **Walmart TC3**: TC1 path, but qty + on Checkout Item details (View) instead of Cart |
+| `test_case_walmart_4` | **Walmart TC4**: same as Walmart TC3 (Checkout Item details qty +) |
+| `test_case_walmart_5` | **Walmart TC5**: My Items search "low cost products" → baskets **A–E, G, H** → cart record → Change → day/slot → Reserve → Continue to checkout → stop |
+| `test_case_wallmart_final` (alias `test_case_walmart_6`) | **Walmart TC6**: fast copy of Walmart TC5 (batched taps, fewer snapshots) — baskets **A–E, G, H** |
 | `task1_add_grocery_to_cart` | Amazon TASK 1: cold start → open master ASIN PDP → add to cart |
 | `task1_cart_checkout_cancel` | TASK 1 (ASIN) + Cart → **start recording** → checkout → place order → Path A cancel |
 

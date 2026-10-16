@@ -153,23 +153,29 @@ def start_ios_screen_recording(driver, *, time_limit: int = 60) -> None:
     High FPS on a busy real device drops frames and Appium encodes assuming a
     fixed rate, which truncates videos (e.g. 3 min of UI → 13–35 s file).
     """
+    # Long recordings (>10 min) at 10 fps / 720p exceed what Appium can return
+    # ("Cannot create a string longer than 0x1fffffe8 characters") and the
+    # video is lost — use 5 fps / 540p for those.
+    long_run = time_limit > 600
+    fps = 5 if long_run else 10
+    scale = "540:-2" if long_run else "720:-2"
     attempts = (
         # Low FPS + realtime PTS so duration matches elapsed wall time.
         {
             "timeLimit": time_limit,
             "forceRestart": True,
             "videoType": "mjpeg",
-            "videoFps": 10,
+            "videoFps": fps,
             "videoFilters": "setpts=(RTCTIME-RTCSTART)/(TB*1000000)",
-            "videoScale": "720:-2",
+            "videoScale": scale,
         },
         {
             "timeLimit": time_limit,
             "forceRestart": True,
             "videoType": "mpeg4",
             "videoQuality": "medium",
-            "videoFps": 10,
-            "videoScale": "720:-2",
+            "videoFps": fps,
+            "videoScale": scale,
         },
         {
             "timeLimit": time_limit,

@@ -265,6 +265,106 @@ def _tap_see_more_delivery_slots(driver, markers: MarkerLog, outcome: dict) -> b
     except Exception:  # noqa: BLE001
         pass
 
+    # Web content often reports "not displayed" while on screen, and Place Your
+    # Order can still be loading — poll by position for up to ~12 s.
+    try:
+        h = float((driver.get_window_size() or {}).get("height") or 844)
+    except Exception:  # noqa: BLE001
+        h = 844.0
+    # A long Place Your Order (big baskets, recording running) can take
+    # longer than WDA's default 15 s to snapshot — it then returns an empty
+    # web view. Give it more time while looking for the link.
+    try:
+        driver.update_settings({"customSnapshotTimeout": 60})
+    except Exception:  # noqa: BLE001
+        pass
+    end = time.monotonic() + 45.0
+    nudge = True  # first nudge goes up (the link sits near the top)
+    while time.monotonic() < end:
+        try:
+            els = driver.find_elements(
+                AppiumBy.IOS_PREDICATE,
+                # When "In 3 hours" is pre-selected, the Same Day option shows
+                # "More time slots available" instead of "See more delivery slots".
+                'label == "See more delivery slots" OR name == "See more delivery slots" OR '
+                'label == "More time slots available" OR name == "More time slots available"',
+            )
+        except Exception:  # noqa: BLE001
+            els = []
+        if not els:
+            # The session can hold a stale copy of Amazon's web content (the
+            # link is on screen but searches return nothing). A page_source
+            # read rebuilds the tree — take the link's position from it.
+            try:
+                import xml.etree.ElementTree as _ET
+
+                root = _ET.fromstring(driver.page_source)
+                for n in root.iter():
+                    if (n.get("label") or n.get("name") or "") in (
+                        "See more delivery slots",
+                        "More time slots available",
+                    ):
+                        x = float(n.get("x") or 0)
+                        y = float(n.get("y") or 0)
+                        cy = y + float(n.get("height") or 20) / 2.0
+                        if 130 <= cy <= h * 0.85:
+                            _tap_center(driver, x + float(n.get("width") or 100) / 2.0, cy)
+                            markers.mark("see_more_delivery_slots_tapped", via="page_source", y=cy)
+                            _mark_step(outcome, "see_more_delivery_slots", status="ok", via="page_source")
+                            outcome["see_more_delivery_slots_tapped"] = True
+                            print(f"  See more delivery slots: tapped via page source @ y={cy:.0f}")
+                            time.sleep(0.4)
+                            return True
+            except Exception:  # noqa: BLE001
+                pass
+        below = above = False
+        for el in els[:4]:
+            try:
+                r = el.rect or {}
+                cy = float(r.get("y", 0)) + float(r.get("height", 20)) / 2.0
+                if cy < 130:
+                    above = True
+                    continue
+                if cy > h * 0.85:
+                    below = True
+                    continue
+                _tap_center(
+                    driver,
+                    float(r.get("x", 0)) + float(r.get("width", 100)) / 2.0,
+                    cy,
+                )
+                markers.mark("see_more_delivery_slots_tapped", via="rect", y=cy)
+                _mark_step(outcome, "see_more_delivery_slots", status="ok", via="rect")
+                outcome["see_more_delivery_slots_tapped"] = True
+                print(f"  See more delivery slots: tapped by position @ y={cy:.0f}")
+                time.sleep(0.4)
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+        if below:
+            _scroll_slots_into_view(driver, direction="down")
+        elif above:
+            _scroll_slots_into_view(driver, direction="up")
+        else:
+            # Not in the tree at all: iOS refreshes a web view's accessibility
+            # tree after interaction — nudge the page (down, then back up).
+            nudge = not nudge
+            _scroll_slots_into_view(driver, direction="down" if nudge else "up")
+        time.sleep(0.5)
+
+    # Diagnostic: keep exactly what this session sees when the link is missing.
+    try:
+        from grocery_latency.config import load_settings as _ls
+
+        _dir = _ls().artifacts_dir
+        _dir.mkdir(parents=True, exist_ok=True)
+        _path = _dir / f"see_more_missing_{int(time.time())}.xml"
+        _path.write_text(driver.page_source, encoding="utf-8")
+        driver.get_screenshot_as_file(str(_path.with_suffix(".png")))
+        print(f"  saved session view → {_path}")
+    except Exception as _exc:  # noqa: BLE001
+        print(f"  could not save session view: {_exc}")
+
     # One short scroll pass only if not immediately visible.
     hit = _fast_scroll_find_tap(driver, SEE_MORE_SLOTS, scrolls=1, timeout=0.55)
     if hit:
@@ -550,6 +650,20 @@ def _place_order_surface_visible(driver) -> bool:
     """
     if _screen_matches(driver, SEE_MORE_SLOTS, timeout=0.25):
         return True
+    # Nav-bar title is the reliable signal: the page can open scrolled to the
+    # top ("Place your order" + Prime banner) with no slot/address links yet.
+    if _screen_matches(
+        driver,
+        (
+            (
+                AppiumBy.IOS_PREDICATE,
+                'type == "XCUIElementTypeNavigationBar" AND '
+                'name BEGINSWITH "Place Your Order"',
+            ),
+        ),
+        timeout=0.3,
+    ):
+        return True
     return _screen_matches(
         driver,
         (
@@ -568,8 +682,167 @@ def _place_order_surface_visible(driver) -> bool:
     )
 
 
+_DETOUR_MARKERS = (
+    "apply now",
+    "amazon.com: amazon visa",
+    "offer details",
+    "pricing & terms",
+    "earn unlimited",
+)
+
+
+def _detour_screen_visible(driver) -> bool:
+    """Off-flow page reached by a stray tap, e.g. the Amazon Visa sign-up."""
+    try:
+        els = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            " OR ".join(
+                f'label CONTAINS[c] "{m}" OR name CONTAINS[c] "{m}"'
+                for m in _DETOUR_MARKERS
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    return any(_safe_displayed(el) for el in els[:4])
+
+
+def _safe_displayed(el) -> bool:
+    try:
+        return bool(el.is_displayed())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _go_back(driver, markers: MarkerLog, why: str) -> None:
+    """Top-left back arrow; coordinate fallback where it sits on Amazon pages."""
+    for by, value in (
+        (AppiumBy.ACCESSIBILITY_ID, "Back"),
+        (
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND visible == 1 AND '
+            '(label ==[c] "back" OR name ==[c] "back" OR '
+            'label CONTAINS[c] "navigate up" OR name ==[c] "chevron.left" OR '
+            'name ==[c] "arrow.left")',
+        ),
+    ):
+        try:
+            for el in driver.find_elements(by, value)[:3]:
+                r = el.rect or {}
+                if float(r.get("y", 0)) < 130 and float(r.get("x", 0)) < 150:
+                    el.click()
+                    markers.mark("went_back", why=why, via="button")
+                    print(f"  ← back ({why})")
+                    time.sleep(0.6)
+                    return
+        except Exception:  # noqa: BLE001
+            continue
+    _tap_center(driver, 39.0, 69.0)
+    markers.mark("went_back", why=why, via="coord")
+    print(f"  ← back via coord ({why})")
+    time.sleep(0.6)
+
+
+def _dismiss_unknown_popup(driver, markers: MarkerLog) -> bool:
+    """Close / Cancel / No thanks on any sheet that is not part of the flow."""
+    for label in ("Close", "close", "Cancel", "No thanks", "Not now", "Not Now", "Dismiss"):
+        try:
+            for el in driver.find_elements(
+                AppiumBy.IOS_PREDICATE,
+                f'type == "XCUIElementTypeButton" AND visible == 1 AND '
+                f'(label == "{label}" OR name == "{label}")',
+            )[:2]:
+                y = float((el.rect or {}).get("y", 0))
+                # Skip the nav-bar Cancel (y≈51) — that exits checkout.
+                if y < 110:
+                    continue
+                el.click()
+                markers.mark("unknown_popup_dismissed", via=label, y=y)
+                print(f"  dismissed unknown popup via {label!r}")
+                time.sleep(0.5)
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+def _escape_detour(driver, markers: MarkerLog, outcome: dict, *, why: str) -> bool:
+    """Back out of a detour page or close an unknown popup. True if acted."""
+    if _detour_screen_visible(driver):
+        _go_back(driver, markers, why=f"detour page ({why})")
+        outcome.setdefault("detours_escaped", []).append(why)
+        return True
+    if _dismiss_unknown_popup(driver, markers):
+        outcome.setdefault("detours_escaped", []).append(f"popup ({why})")
+        return True
+    return False
+
+
+def _handle_payment_screen_soft(driver, markers: MarkerLog, outcome: dict) -> bool:
+    """Pick the 2nd card + Continue. If that's impossible (no 2nd saved card),
+    back out of the payment picker and carry on without the payment change."""
+    try:
+        _handle_payment_screen(driver, markers, outcome)
+        return True
+    except AssertionError as exc:
+        print(f"  payment change skipped: {exc}")
+        markers.mark("payment_change_skipped", reason=str(exc)[:120])
+        _mark_step(outcome, "payment_change", status="skipped", reason=str(exc)[:120])
+        outcome["payment_change_skipped"] = str(exc)
+        _escape_detour(driver, markers, outcome, why="payment")
+        if _screen_matches(
+            driver,
+            (
+                (AppiumBy.IOS_PREDICATE,
+                 'name CONTAINS[c] "Select a payment method" OR '
+                 'label CONTAINS[c] "Select a payment method"'),
+            ),
+            timeout=0.4,
+        ) or _detour_screen_visible(driver):
+            _go_back(driver, markers, why="leave payment picker")
+        return False
+
+
+def _recover_amazon_error_page(driver, markers: MarkerLog | None = None) -> bool:
+    """Amazon's "UH-OH Something went wrong on our end." page (seen on a
+    50-line Cart) — tap TRY AGAIN until the page loads (max 3×)."""
+    hit = False
+    for _ in range(3):
+        try:
+            els = driver.find_elements(
+                AppiumBy.IOS_PREDICATE,
+                'label == "TRY AGAIN" OR name == "TRY AGAIN" OR '
+                'label CONTAINS[c] "Something went wrong on our end"',
+            )
+        except Exception:  # noqa: BLE001
+            return hit
+        btn = None
+        for el in els[:3]:
+            try:
+                if (el.get_attribute("label") or "").strip().upper() == "TRY AGAIN":
+                    btn = el
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+        if not els:
+            return hit
+        hit = True
+        print("  Amazon error page (UH-OH) — tapping TRY AGAIN …")
+        if markers is not None:
+            markers.mark("amazon_error_page_try_again")
+        try:
+            if btn is not None:
+                btn.click()
+            else:
+                driver.find_element(AppiumBy.ACCESSIBILITY_ID, "cartTab").click()
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(4.0)
+    return hit
+
+
 def _tc6_checkout_edits(driver, markers: MarkerLog, outcome: dict) -> None:
     """TC5 checkout plus expand delivery slots and select the last one."""
+    _recover_amazon_error_page(driver, markers)
     _tap_proceed_until_left_cart(driver, markers, outcome)
     time.sleep(0.15)
 
@@ -578,7 +851,8 @@ def _tc6_checkout_edits(driver, markers: MarkerLog, outcome: dict) -> None:
     slot_done = False
     outcome["delivery_slot_changed"] = False
 
-    first = _wait_checkout_entry(driver, markers, timeout=10.0)
+    # Big baskets (50 lines) take 20 s+ to open checkout.
+    first = _wait_checkout_entry(driver, markers, timeout=25.0)
     markers.mark("checkout_screen", screen=first, round=0, via="entry_wait")
     print(f"  checkout entry surface: {first}")
     if first == "webview" and not _place_order_surface_visible(driver):
@@ -590,8 +864,39 @@ def _tc6_checkout_edits(driver, markers: MarkerLog, outcome: dict) -> None:
         first = "place_order"
         print("  treating surface as place_order (delivery slots/address visible)")
 
-    for round_i in range(10):
+    unknown_streak = 0
+    proceed_retries = 0
+    for round_i in range(30):
+        if _detour_screen_visible(driver):
+            # Stray page (e.g. Amazon Visa sign-up): back out and carry on.
+            _escape_detour(driver, markers, outcome, why=f"round {round_i + 1}")
+            first = None
+            continue
         screen = first if round_i == 0 else _detect_checkout_screen(driver)
+        if screen in ("unknown", "webview") and not _place_order_surface_visible(driver):
+            # Unknown popup / screen: close it, or go back if it persists.
+            unknown_streak += 1
+            # Checkout can take 20 s+ to load after Proceed (big baskets show
+            # only a spinner) — give it time, and only back out of an unknown
+            # screen that persists (~6 checks × 2.5 s).
+            time.sleep(2.5)
+            if unknown_streak >= 6:
+                if not _escape_detour(driver, markers, outcome, why="unknown screen"):
+                    _go_back(driver, markers, why="unknown screen")
+                unknown_streak = 0
+                first = None
+                continue
+        else:
+            unknown_streak = 0
+        if screen == "cart" and proceed_retries < 2:
+            # Dropped back to the Cart (slow load / backed out) — Proceed again.
+            proceed_retries += 1
+            print(f"  back on Cart — tapping Proceed again ({proceed_retries}/2)")
+            markers.mark("checkout_proceed_retry", index=proceed_retries)
+            _tap_proceed_until_left_cart(driver, markers, outcome)
+            time.sleep(1.0)
+            first = None
+            continue
         if round_i > 0:
             markers.mark("checkout_screen", screen=screen, round=round_i + 1)
             print(f"  checkout screen detect: {screen} (round {round_i + 1})")
@@ -626,7 +931,7 @@ def _tc6_checkout_edits(driver, markers: MarkerLog, outcome: dict) -> None:
                 if screen == "payment":
                     continue
             else:
-                _handle_payment_screen(driver, markers, outcome)
+                _handle_payment_screen_soft(driver, markers, outcome)
                 payment_done = True
                 screen = _wait_after_payment(driver, timeout=9.0)
                 markers.mark(
@@ -650,14 +955,16 @@ def _tc6_checkout_edits(driver, markers: MarkerLog, outcome: dict) -> None:
                 first = None
                 continue
             if screen == "address":
-                # Prefer Place Your Order slot expand before address when possible.
-                if not slot_done:
-                    first = None
-                    continue
                 if not address_done:
                     _handle_address_screen(driver, markers, outcome)
                     address_done = True
-                break
+                if slot_done:
+                    break
+                # Address picker came first — confirm it, then continue to
+                # Place Your Order for the slot step.
+                time.sleep(0.3)
+                first = None
+                continue
             if screen == "place_order":
                 pass
             else:
@@ -665,16 +972,21 @@ def _tc6_checkout_edits(driver, markers: MarkerLog, outcome: dict) -> None:
                 continue
 
         if screen == "address":
-            if address_done:
+            if not address_done:
+                # Amazon may open "Select a delivery address" straight after
+                # Proceed — pick the 2nd address + Deliver to this address here.
+                _handle_address_screen(driver, markers, outcome)
+                address_done = True
+            elif not (slot_done and payment_done):
+                # Address already confirmed: Place Your Order is still loading
+                # (spinner over the address page with a big basket).
+                time.sleep(2.5)
+            if slot_done and payment_done:
                 break
-            if not slot_done:
-                # Need Place Your Order for slot expand — keep looping briefly.
-                first = None
-                time.sleep(0.15)
-                continue
-            _handle_address_screen(driver, markers, outcome)
-            address_done = True
-            break
+            # Then go on to Place Your Order for the slot (and payment) step.
+            first = None
+            time.sleep(0.3)
+            continue
 
         if screen == "place_order":
             # Place Your Order can sit under a reappearing Prime sheet.
@@ -742,6 +1054,8 @@ def _tc6_checkout_edits(driver, markers: MarkerLog, outcome: dict) -> None:
         raise AssertionError(
             "Payment step finished but address change did not complete"
         )
+    if outcome.get("payment_change_skipped"):
+        print("  NOTE: payment change skipped (no 2nd saved card on the account)")
     print(
         f"  checkout edits done — slot={slot_done} payment={payment_done} "
         f"address={address_done}"
@@ -941,6 +1255,10 @@ def run_test_case_6(
             f"via Grocery→Produce/+; cart → record → See more slots → last slot → "
             f"2nd payment → Continue → 2nd address → Deliver"
         )
+        if outcome.get("payment_change_skipped"):
+            outcome["message"] = outcome["message"].replace(
+                "2nd payment → Continue", "payment change SKIPPED (no 2nd card)"
+            )
         print(outcome["message"])
         return outcome
     except Exception as exc:  # noqa: BLE001

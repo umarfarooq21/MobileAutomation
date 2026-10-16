@@ -19,6 +19,7 @@ Does not place the order. Unit scaling is on Checkout Item details
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timezone
 
@@ -64,6 +65,16 @@ from grocery_latency.scenarios.test_case_walmart_2 import (
     _tap_all_items_filter,
     resolve_basket_sample,
 )
+
+_MAX_QTY_RE = re.compile(r"max\s*(\d+)", re.I)
+_CURRENT_QTY_RE = re.compile(r"current quantity is (\d+)", re.I)
+_INC_ITEM_RE = re.compile(
+    r"Increase quantity of (.+?), The current quantity is", re.I
+)
+# Coord taps only between scans. find_elements on Checkout ≈ 12s — minimize.
+_QTY_TAP_GAP = 0.10
+_QTY_SETTLE = 0.6
+_QTY_MAX_ROUNDS = 6
 
 TEST_CASE_NAME = "Test Case Walmart 3"
 TEST_CASE_ID = "test_case_walmart_3"
@@ -114,11 +125,68 @@ def _checkout_payment_screen_visible(driver) -> bool:
         return False
 
 
+def _dismiss_walmart_plus_checkout_splash(
+    driver, markers: MarkerLog | None = None
+) -> bool:
+    """Dismiss Walmart+ trial sheet that covers Checkout (No thanks / Close)."""
+    try:
+        splash = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'name CONTAINS[c] "WalmartPlusSplash" OR '
+            'label CONTAINS[c] "Confirm plan" OR '
+            'label CONTAINS[c] "I agree to the terms"',
+        )
+    except Exception:  # noqa: BLE001
+        splash = []
+    if not splash:
+        return False
+    for by, value in (
+        (
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND visible == 1 AND '
+            '(label == "No thanks" OR name == "No thanks" OR '
+            'label == "No Thanks" OR name == "No Thanks")',
+        ),
+        (AppiumBy.ACCESSIBILITY_ID, "No thanks"),
+        (AppiumBy.ACCESSIBILITY_ID, "close"),
+        (AppiumBy.ACCESSIBILITY_ID, "Close"),
+        (
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND visible == 1 AND '
+            '(label == "Close" OR name == "Close" OR label == "close")',
+        ),
+    ):
+        try:
+            el, _, _ = find_first(driver, ((by, value),), timeout=1.2)
+            el.click()
+            if markers is not None:
+                markers.mark("walmart_plus_splash_dismissed", by=by, value=value)
+            print("  dismissed Walmart+ checkout splash (No thanks)")
+            time.sleep(_MED)
+            return True
+        except TimeoutError:
+            continue
+    try:
+        size = driver.get_window_size() or {}
+        w = float(size.get("width") or 390)
+        h = float(size.get("height") or 844)
+        # "No thanks" sits under Confirm plan near the bottom.
+        _tap_center(driver, w * 0.50, h * 0.88)
+        time.sleep(_MED)
+        if markers is not None:
+            markers.mark("walmart_plus_splash_dismissed", via="coord")
+        print("  dismissed Walmart+ checkout splash (coord)")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _tap_checkout_item_details_view(
     driver, markers: MarkerLog, outcome: dict
 ) -> None:
     """On Checkout, open Item details via the View link."""
     print('Step: on Checkout tap Item details "View" …')
+    _dismiss_walmart_plus_checkout_splash(driver, markers)
     # Payment section is below Item details — scroll up first so View is on screen.
     for _ in range(3):
         if _checkout_payment_screen_visible(driver):
@@ -128,18 +196,19 @@ def _tap_checkout_item_details_view(
             break
 
     for attempt in range(4):
+        _dismiss_walmart_plus_checkout_splash(driver, markers)
         strategies = (
             (AppiumBy.ACCESSIBILITY_ID, "View Item details"),
             (
                 AppiumBy.IOS_PREDICATE,
-                'type == "XCUIElementTypeButton" AND visible == 1 AND '
+                'type == "XCUIElementTypeButton" AND '
                 '(label == "View Item details" OR name == "View Item details" OR '
                 'label CONTAINS[c] "View Item details")',
             ),
             (AppiumBy.ACCESSIBILITY_ID, "View"),
             (
                 AppiumBy.IOS_PREDICATE,
-                'type == "XCUIElementTypeButton" AND visible == 1 AND '
+                'type == "XCUIElementTypeButton" AND '
                 '(label == "View" OR name == "View")',
             ),
         )
@@ -154,9 +223,10 @@ def _tap_checkout_item_details_view(
         by = value = ""
         try:
             # Prefer the right-side View next to "Item details".
+            # Do not require visible==1 — splash overlays often mark it false.
             views = driver.find_elements(
                 AppiumBy.IOS_PREDICATE,
-                'type == "XCUIElementTypeButton" AND visible == 1 AND '
+                'type == "XCUIElementTypeButton" AND '
                 '(label == "View Item details" OR name == "View Item details" OR '
                 'label == "View" OR name == "View")',
             )
@@ -240,11 +310,12 @@ def _tap_checkout_item_details_view(
     raise AssertionError("Item details sheet did not open after View")
 
 
-def _scroll_item_details_list(driver, *, direction: str = "down") -> None:
+def _scroll_item_details_list(
+    driver, *, direction: str = "down", percent: float = 0.14
+) -> None:
     """Scroll inside Item details sheet without dismissing it.
 
-    Global ``_scroll_up`` swipes downward from mid-screen and closes the modal.
-    Keep the gesture in the sheet body (below the title, above Done).
+    Keep a short drag in the sheet body only — long swipes dismiss the modal.
     """
     try:
         size = driver.get_window_size() or {}
@@ -252,16 +323,18 @@ def _scroll_item_details_list(driver, *, direction: str = "down") -> None:
         h = int(size.get("height") or 844)
     except Exception:  # noqa: BLE001
         w, h = 390, 844
-    # Sheet list band roughly y 0.28–0.78.
+    # Stay in mid sheet (below title, above Done). Short travel only.
+    delta = max(40, int(h * max(0.08, min(percent, 0.22))))
+    mid = int(h * 0.52)
     if direction == "up":
-        from_y, to_y = int(h * 0.38), int(h * 0.62)
+        from_y, to_y = mid - delta // 2, mid + delta // 2
     else:
-        from_y, to_y = int(h * 0.62), int(h * 0.38)
+        from_y, to_y = mid + delta // 2, mid - delta // 2
     try:
         driver.execute_script(
             "mobile: dragFromToForDuration",
             {
-                "duration": 0.16,
+                "duration": 0.12,
                 "fromX": int(w * 0.50),
                 "fromY": from_y,
                 "toX": int(w * 0.50),
@@ -272,62 +345,370 @@ def _scroll_item_details_list(driver, *, direction: str = "down") -> None:
         pass
 
 
-def _item_details_increments(
+def _item_details_increment_els(
     driver, *, min_y: float | None = None, y_hi_frac: float = 0.88
-) -> list[tuple[float, float, float]]:
-    """Visible qty + controls on Item details sheet (top → bottom)."""
+) -> list[tuple[object, float, float, float]]:
+    """Visible Item details qty + buttons as (el, y, cx, cy), top → bottom."""
     try:
         size = driver.get_window_size() or {}
         h = float(size.get("height") or 844)
         win_w = float(size.get("width") or 390)
     except Exception:  # noqa: BLE001
         h, win_w = 844.0, 390.0
-    candidates: list[tuple[float, float, float]] = []
-    preds = (
-        'type == "XCUIElementTypeButton" AND visible == 1 AND '
-        '(name == "stepper.incrementButton" OR name CONTAINS[c] "increment" OR '
-        'label == "+" OR name == "+")',
-        'type == "XCUIElementTypeButton" AND visible == 1 AND '
-        '(label CONTAINS[c] "Increase" OR name CONTAINS[c] "Increase")',
-    )
-    for pred in preds:
+    candidates: list[tuple[object, float, float, float]] = []
+    try:
+        els = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND visible == 1 AND '
+            '(name == "stepper.incrementButton" OR '
+            'label CONTAINS[c] "Increase quantity")',
+        )
+    except Exception:  # noqa: BLE001
+        els = []
+    for el in els[:30]:
         try:
-            els = driver.find_elements(AppiumBy.IOS_PREDICATE, pred)
-        except Exception:  # noqa: BLE001
-            els = []
-        for el in els[:24]:
-            try:
-                r = el.rect or {}
-                y = float(r.get("y", 0))
-                x = float(r.get("x", 0))
-                ww = float(r.get("width", 0))
-                hh = float(r.get("height", 0))
-                name = (el.get_attribute("name") or "").lower()
-                label = (el.get_attribute("label") or "").lower()
-                if "decrement" in name or "decrease" in name or "remove" in label:
-                    continue
-                # Sheet body — avoid sticky Done footer / title.
-                if y < 150 or y > h * y_hi_frac:
-                    continue
-                if min_y is not None and y < min_y:
-                    continue
-                if ww < 12 or hh < 12 or ww > 200:
-                    continue
-                # Prefer right-side steppers.
-                if x + ww / 2.0 < win_w * 0.45:
-                    continue
-                candidates.append((y, x + ww / 2.0, y + hh / 2.0))
-            except Exception:  # noqa: BLE001
+            r = el.rect or {}
+            y = float(r.get("y", 0))
+            x = float(r.get("x", 0))
+            ww = float(r.get("width", 0))
+            hh = float(r.get("height", 0))
+            # Predicate already selects increment; skip extra name lookup (WDA snapshot).
+            if y < 150 or y > h * y_hi_frac:
                 continue
-        if candidates:
-            break
-    candidates.sort(key=lambda t: (round(t[0] / 8.0), -t[1]))
-    unique: list[tuple[float, float, float]] = []
+            if min_y is not None and y < min_y:
+                continue
+            if ww < 12 or hh < 12 or ww > 200:
+                continue
+            if x + ww / 2.0 < win_w * 0.45:
+                continue
+            candidates.append((el, y, x + ww / 2.0, y + hh / 2.0))
+        except Exception:  # noqa: BLE001
+            continue
+    candidates.sort(key=lambda t: (round(t[1] / 8.0), -t[2]))
+    unique: list[tuple[object, float, float, float]] = []
     for c in candidates:
-        if any(abs(c[0] - u[0]) < 28 for u in unique):
+        if any(abs(c[1] - u[1]) < 28 for u in unique):
             continue
         unique.append(c)
     return unique
+
+
+def _item_details_increments(
+    driver, *, min_y: float | None = None, y_hi_frac: float = 0.88
+) -> list[tuple[float, float, float]]:
+    """Visible qty + controls on Item details sheet (top → bottom) as (y,cx,cy)."""
+    return [
+        (y, cx, cy)
+        for _el, y, cx, cy in _item_details_increment_els(
+            driver, min_y=min_y, y_hi_frac=y_hi_frac
+        )
+    ]
+
+
+def _parse_increment_label(label: str) -> tuple[str, int | None]:
+    """Product key + current qty from one increment-button label."""
+    key = ""
+    m = _INC_ITEM_RE.search(label or "")
+    if m:
+        key = m.group(1).strip()[:48]
+    qm = _CURRENT_QTY_RE.search(label or "")
+    qty = int(qm.group(1)) if qm else None
+    return key, qty
+
+
+def _read_increment_label(el) -> tuple[str, int | None]:
+    try:
+        label = el.get_attribute("label") or ""
+    except Exception:  # noqa: BLE001
+        return "", None
+    return _parse_increment_label(label)
+
+
+def _snapshot_item_details_rows(
+    driver, *, y_hi_frac: float = 0.72
+) -> list[tuple[float, float, str, int | None]]:
+    """One a11y scan → (cx, cy, item_key, qty) in the tappable band only.
+
+    Keep y below ~0.72 so + is not under Done. Coord taps only afterward.
+    """
+    rows: list[tuple[float, float, str, int | None]] = []
+    for el, _y, cx, cy in _item_details_increment_els(
+        driver, y_hi_frac=y_hi_frac
+    ):
+        key, qty = _read_increment_label(el)
+        rows.append((cx, cy, key, qty))
+    return rows
+
+
+def _burst_coord_plus(driver, *, cx: float, cy: float, n: int) -> int:
+    """Rapid + taps at fixed coords — no element/tree lookups."""
+    taps = 0
+    for _ in range(max(0, n)):
+        _tap_center(driver, cx, cy)
+        taps += 1
+        time.sleep(_QTY_TAP_GAP)
+    return taps
+
+
+def _qty_el_for_key(
+    driver, item_key: str, *, near_y: float
+) -> tuple[object, float, float, int | None] | None:
+    """Targeted find for one SKU's + button → (el, cx, cy, qty)."""
+    if not item_key:
+        return None
+    safe = item_key.replace("\\", "\\\\").replace('"', '\\"')[:40]
+    try:
+        els = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND '
+            'name == "stepper.incrementButton" AND '
+            f'label CONTAINS[c] "{safe}"',
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    best: tuple[float, object, float, float, int | None] | None = None
+    for el in els[:6]:
+        try:
+            r = el.rect or {}
+            x = float(r.get("x", 0))
+            y = float(r.get("y", 0))
+            ww = float(r.get("width", 0))
+            hh = float(r.get("height", 0))
+            if ww < 8 or hh < 8:
+                continue
+            cx, cy = x + ww / 2.0, y + hh / 2.0
+            _key, qty = _read_increment_label(el)
+            score = abs(cy - near_y)
+            if best is None or score < best[0]:
+                best = (score, el, cx, cy, qty)
+        except Exception:  # noqa: BLE001
+            continue
+    if best is None:
+        return None
+    return best[1], best[2], best[3], best[4]
+
+
+def _qty_for_key_cheap(
+    driver, item_key: str, *, near_y: float
+) -> tuple[float, float, int | None] | None:
+    """Single targeted find for one SKU (coords + qty only)."""
+    hit = _qty_el_for_key(driver, item_key, near_y=near_y)
+    if hit is None:
+        return None
+    _el, cx, cy, qty = hit
+    return cx, cy, qty
+
+
+def _bring_row_into_band(
+    driver,
+    item_key: str,
+    *,
+    cx: float,
+    cy: float,
+    y_safe: float,
+    y_top: float = 170.0,
+) -> tuple[object | None, float, float, int | None]:
+    """Re-locate one SKU and nudge-scroll until its + is tappable.
+
+    Raising a line reflows the sheet, so rows below shift down under the
+    footer (visible=false) where taps silently miss.
+    """
+    el: object | None = None
+    qty: int | None = None
+    try:
+        h = float((driver.get_window_size() or {}).get("height") or 844)
+    except Exception:  # noqa: BLE001
+        h = 844.0
+    for _ in range(6):
+        found = _qty_el_for_key(driver, item_key, near_y=cy)
+        if found is None:
+            _scroll_item_details_list(driver, direction="down", percent=0.18)
+            time.sleep(_FAST)
+            continue
+        el, cx, cy, qty = found
+        # Prefer mid-band (clear of title + Done). Skip off-screen (y < 0).
+        if y_top <= cy <= y_safe:
+            return el, cx, cy, qty
+        aim = h * 0.42
+        _scroll_item_details_list(
+            driver,
+            direction="down" if cy > y_safe else "up",
+            percent=max(0.12, min(0.22, abs(cy - aim) / h)),
+        )
+        time.sleep(_FAST)
+    return el, cx, cy, qty
+
+
+def _click_plus(el, driver, *, cx: float, cy: float) -> bool:
+    """Tap the + via elementId / right-biased coords — never el.click().
+
+    Walmart nests steppers under Remove in the a11y tree; el.click() and
+    left-biased taps can activate Remove and delete the line.
+    """
+    try:
+        eid = getattr(el, "id", None)
+        if eid:
+            driver.execute_script("mobile: tap", {"elementId": eid})
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        r = el.rect or {}
+        x = float(r.get("x", 0))
+        y = float(r.get("y", 0))
+        ww = float(r.get("width", 0))
+        hh = float(r.get("height", 0))
+        if ww >= 8 and hh >= 8:
+            # Bias right so the hit stays on + (Remove sits to the left).
+            cx = x + ww * 0.72
+            cy = y + hh / 2.0
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _tap_center(driver, cx, cy)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _unfinished_item_keys(
+    driver, *, done_keys: set[str], target_qty: int
+) -> list[tuple[str, float, float, int]]:
+    """All Item details SKUs still below target (incl. under Done / off-screen)."""
+    try:
+        els = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND '
+            'name == "stepper.incrementButton"',
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[tuple[str, float, float, int]] = []
+    seen: set[str] = set()
+    for el in els[:40]:
+        try:
+            key, qty = _read_increment_label(el)
+            if not key or key in done_keys or key in seen:
+                continue
+            if qty is not None and qty >= target_qty:
+                continue
+            r = el.rect or {}
+            x = float(r.get("x", 0))
+            y = float(r.get("y", 0))
+            ww = float(r.get("width", 0))
+            hh = float(r.get("height", 0))
+            cx, cy = x + ww / 2.0, y + hh / 2.0
+            seen.add(key)
+            out.append((key, cx, cy, qty if qty is not None else 1))
+        except Exception:  # noqa: BLE001
+            continue
+    out.sort(key=lambda t: t[2])
+    return out
+
+
+def _raise_one_item_details_line(
+    driver,
+    markers: MarkerLog,
+    *,
+    line_no: int,
+    cx: float,
+    cy: float,
+    item_key: str,
+    start_qty: int,
+    target_qty: int,
+    y_safe: float,
+    relocate: bool = False,
+) -> tuple[int, int]:
+    """Raise one line to target via element.click() (coord taps miss after scroll).
+
+    Walmart drops presses while syncing the cart, so verify and top up the
+    shortfall. Never tap more than the verified shortfall.
+    """
+    current = start_qty if start_qty > 0 else 1
+    taps = 0
+    el: object | None = None
+    if relocate and item_key:
+        el, cx, cy, qty = _bring_row_into_band(
+            driver, item_key, cx=cx, cy=cy, y_safe=y_safe
+        )
+        if qty is not None:
+            current = start_qty = qty
+    for _round in range(_QTY_MAX_ROUNDS):
+        if current == target_qty:
+            break
+        if item_key:
+            el, cx, cy, qty = _bring_row_into_band(
+                driver, item_key, cx=cx, cy=cy, y_safe=y_safe
+            )
+            if qty is not None:
+                current = qty
+            if current == target_qty:
+                break
+        if current < target_qty:
+            need = target_qty - current
+            # Fresh element each burst — stale refs after scroll are dead.
+            if el is None and item_key:
+                hit = _qty_el_for_key(driver, item_key, near_y=cy)
+                if hit is not None:
+                    el, cx, cy, _q = hit
+            for _ in range(need):
+                if el is not None:
+                    if not _click_plus(el, driver, cx=cx, cy=cy):
+                        break
+                else:
+                    _tap_center(driver, cx, cy)
+                taps += 1
+                time.sleep(_QTY_TAP_GAP)
+                # Rebind every few clicks — sheet reflows as qty grows.
+                if taps % 3 == 0 and item_key:
+                    hit = _qty_el_for_key(driver, item_key, near_y=cy)
+                    if hit is not None:
+                        el, cx, cy, qty = hit
+                        if qty is not None:
+                            current = qty
+                        if current >= target_qty:
+                            break
+                        try:
+                            if str(el.get_attribute("enabled")).lower() == "false":
+                                break
+                        except Exception:  # noqa: BLE001
+                            pass
+        else:
+            for _ in range(current - target_qty):
+                _tap_center(driver, max(20.0, cx - 86.0), cy)
+                taps += 1
+                time.sleep(_QTY_TAP_GAP)
+        time.sleep(_QTY_SETTLE)
+        verified = _qty_el_for_key(driver, item_key, near_y=cy) if item_key else None
+        if verified is None:
+            el = None
+            continue
+        el, cx, cy, qty = verified
+        if qty is not None:
+            current = qty
+
+    markers.mark(
+        "item_details_qty_plus_tapped",
+        line=line_no,
+        taps=taps,
+        start_qty=start_qty,
+        final_qty=current,
+        item=(item_key or "")[:32] or None,
+        x=cx,
+        y=cy,
+    )
+    if current < target_qty:
+        raise AssertionError(
+            f"Item details line #{line_no}: qty ×{current} "
+            f"< target ×{target_qty} after {taps} + tap(s)"
+            + (f" [{item_key}]" if item_key else "")
+        )
+    if current > target_qty:
+        raise AssertionError(
+            f"Item details line #{line_no}: qty ×{current} "
+            f"> target ×{target_qty} (could not trim)"
+        )
+    return start_qty, current
 
 
 def _increase_item_details_qty(
@@ -335,67 +716,98 @@ def _increase_item_details_qty(
     markers: MarkerLog,
     outcome: dict,
     *,
-    increase_by: int,
+    target_qty: int,
     expected_items: int | None = None,
 ) -> None:
-    """On Item details sheet, raise EVERY line to units_each via qty +."""
-    if increase_by <= 0:
+    """Raise every Item details line to ``target_qty`` — fast coord bursts.
+
+    One screen scan per visible batch; tap all in-band rows before scrolling.
+    Avoids per-tap / per-row full-tree snapshots (~12s each on Checkout).
+    """
+    increase_by = max(0, target_qty - 1)
+    if target_qty <= 1:
         print("Step: Item details qty increase skipped (units_each=1) …")
         outcome["checkout_item_details_qty_increased_by"] = 0
         outcome["checkout_item_details_lines_increased"] = 0
         markers.mark("item_details_qty_increase_skipped", reason="units_each_is_1")
         return
 
-    # Wait briefly for sheet chrome after View.
     end = time.monotonic() + 2.5
     while time.monotonic() < end and not _item_details_sheet_visible(driver):
-        time.sleep(0.15)
+        time.sleep(0.12)
     if not _item_details_sheet_visible(driver):
         raise AssertionError(
             "Item details sheet not open — cannot increase quantities"
         )
 
+    try:
+        size = driver.get_window_size() or {}
+        h = float(size.get("height") or 844)
+    except Exception:  # noqa: BLE001
+        h = 844.0
+    # Only tap steppers clearly above Done.
+    y_safe = h * 0.70
+
     print(
-        f"Step: on Item details increase EVERY line by +{increase_by} "
-        f"(to units_each={increase_by + 1})"
+        f"Step: on Item details raise EVERY line to ×{target_qty} "
+        f"(fast coord burst)"
         + (f" — {expected_items} lines expected" if expected_items else "")
         + " …"
     )
 
     lines_done = 0
     stagnant = 0
-    last_cy: float | None = None
-    max_rounds = max(24, (expected_items or 8) * 6)
+    done_keys: set[str] = set()
+    max_rounds = max(12, (expected_items or 8) * 3)
 
     for round_i in range(max_rounds):
         if expected_items is not None and lines_done >= expected_items:
             break
         if not _item_details_sheet_visible(driver):
-            print("  Item details sheet closed unexpectedly — reopening …")
+            print("  Item details sheet closed — reopening …")
             try:
                 _tap_checkout_item_details_view(driver, markers, outcome)
+                stagnant = 0
+                time.sleep(_MED)
             except Exception as exc:  # noqa: BLE001
                 print(f"  reopen failed: {exc}")
                 break
-            last_cy = None
             continue
 
-        min_y = (last_cy + 36.0) if last_cy is not None else None
-        hits = _item_details_increments(driver, min_y=min_y, y_hi_frac=0.88)
-        if not hits:
-            hits = _item_details_increments(driver, y_hi_frac=0.90)
-            if hits and last_cy is not None and abs(hits[0][2] - last_cy) < 36:
-                hits = []
+        # Always take the topmost unfinished SKU (incl. under Done). Visible-only
+        # snapshots skip buried rows and jump to Roma while Yellow sits at ×1 —
+        # later scrolls then can't find it if Remove was hit mid-raise.
+        unfinished = _unfinished_item_keys(
+            driver, done_keys=done_keys, target_qty=target_qty
+        )
+        rows = _snapshot_item_details_rows(driver, y_hi_frac=0.88)
+        for _cx, _cy, key, qty in rows:
+            if key and qty is not None and qty >= target_qty:
+                done_keys.add(key)
 
-        if not hits:
+        pending: list[tuple[float, float, str, int]] = []
+        if unfinished:
+            key, cx, cy, start_qty = unfinished[0]
+            _el, cx, cy, qty = _bring_row_into_band(
+                driver, key, cx=cx, cy=cy, y_safe=y_safe
+            )
+            if qty is not None:
+                start_qty = qty
+            if qty is not None and qty >= target_qty:
+                done_keys.add(key)
+                continue
+            if 170 <= cy <= y_safe:
+                pending = [(cx, cy, key, start_qty)]
+
+        if not pending:
             stagnant += 1
-            if stagnant >= 10:
+            if stagnant >= 12:
                 break
-            # Sheet-safe scroll only — never global _scroll_up (dismisses modal).
-            if stagnant in (3, 6, 9):
-                _scroll_item_details_list(driver, direction="up")
-            else:
-                _scroll_item_details_list(driver, direction="down")
+            _scroll_item_details_list(
+                driver,
+                direction="up" if stagnant in (4, 7, 10) else "down",
+                percent=0.16,
+            )
             time.sleep(_FAST)
             markers.mark(
                 "item_details_qty_scrolled",
@@ -406,61 +818,43 @@ def _increase_item_details_qty(
             continue
 
         stagnant = 0
-        _y, cx, cy = hits[0]
-        taps = 0
-        for i in range(increase_by):
-            try:
-                if i == 0 or i % 3 == 0:
-                    near = _item_details_increments(
-                        driver, min_y=(cy - 40.0), y_hi_frac=0.90
-                    )
-                    if near:
-                        near.sort(key=lambda t: abs(t[2] - cy))
-                        _y, cx, cy = near[0]
-                _tap_center(driver, cx, cy)
-                taps += 1
-                markers.mark(
-                    "item_details_qty_plus_tapped",
-                    line=lines_done + 1,
-                    index=i + 1,
-                    x=cx,
-                    y=cy,
-                )
-                time.sleep(0.08)
-            except Exception as exc:  # noqa: BLE001
-                print(
-                    f"  item details line #{lines_done + 1} "
-                    f"qty + {i + 1} failed: {exc}"
-                )
-                break
-
-        if taps < increase_by:
-            print(
-                f"  item details line #{lines_done + 1} qty +"
-                f"{taps}/{increase_by} (partial)"
-            )
-        else:
-            print(
-                f"  item details line #{lines_done + 1} qty +"
-                f"{taps}/{increase_by} @ ({cx:.0f},{cy:.0f})"
-            )
+        # One row per round — raising qty reflows the sheet and invalidates
+        # sibling coords (rows slide under Done → silent tap misses).
+        cx, cy, key, start_qty = pending[0]
+        if key and key in done_keys:
+            continue
+        line_no = lines_done + 1
+        start_qty, final_qty = _raise_one_item_details_line(
+            driver,
+            markers,
+            line_no=line_no,
+            cx=cx,
+            cy=cy,
+            item_key=key,
+            start_qty=start_qty,
+            target_qty=target_qty,
+            y_safe=y_safe,
+            relocate=True,
+        )
+        print(
+            f"  item details line #{line_no}: ×{start_qty}→×{final_qty} "
+            f"(target ×{target_qty})"
+            + (f" [{key[:36]}]" if key else "")
+            + f" @ ({cx:.0f},{cy:.0f})"
+        )
         markers.mark(
             "item_details_line_qty_increased",
-            line=lines_done + 1,
-            taps=taps,
-            expected=increase_by,
+            line=line_no,
+            start_qty=start_qty,
+            final_qty=final_qty,
+            target_qty=target_qty,
+            item=key[:48] if key else None,
             y=cy,
         )
-        if taps == 0:
-            stagnant += 1
-            _scroll_item_details_list(driver, direction="down")
-            time.sleep(_FAST)
-            continue
         lines_done += 1
-        last_cy = cy
-        # Nudge so the next line's stepper clears into view.
-        _scroll_item_details_list(driver, direction="down")
-        time.sleep(_FAST)
+        if key:
+            done_keys.add(key)
+        # No forced scroll — next round rescans; hunt-scroll only when pending empty.
 
     outcome["checkout_item_details_qty_increased_by"] = increase_by
     outcome["checkout_item_details_lines_increased"] = lines_done
@@ -474,10 +868,11 @@ def _increase_item_details_qty(
         ),
         lines=lines_done,
         increase_by=increase_by,
+        target_qty=target_qty,
         expected_items=expected_items,
     )
     print(
-        f"  item details qty + done: {lines_done} line(s) × +{increase_by}"
+        f"  item details qty + done: {lines_done} line(s) → ×{target_qty}"
         + (
             f" (expected {expected_items})"
             if expected_items is not None
@@ -487,7 +882,7 @@ def _increase_item_details_qty(
     if expected_items is not None and lines_done < expected_items:
         raise AssertionError(
             f"Only increased qty on {lines_done}/{expected_items} "
-            f"Item details line(s) by +{increase_by}"
+            f"Item details line(s) to ×{target_qty}"
         )
 
 
@@ -535,7 +930,14 @@ def run_test_case_walmart_3(
 
     sample = resolve_basket_sample(basket_size)
     qty_plus = max(0, sample.units_each - 1)
-    rec_limit = CART_RECORDING_SECONDS
+    # Item details qty+ for E/H/G often exceeds the shared 240s Cart cap;
+    # Appium timeLimit cuts the file mid-increments. Keep recording until
+    # Done → Checkout, then stop_recording_screen() saves the full clip.
+    rec_limit = max(
+        600,
+        int(getattr(settings, "recording_time_limit_seconds", 600) or 600),
+        CART_RECORDING_SECONDS,
+    )
     plan = describe_session(settings, retailer, bundle_id)
     plan["scenario"] = TEST_CASE_ID
     plan["test_case"] = TEST_CASE_NAME
@@ -747,13 +1149,14 @@ def run_test_case_walmart_3(
         _tap_continue_to_checkout(driver, markers, outcome)
         _tap_missing_anything_continue(driver, markers, outcome)
         _wait_checkout_screen(driver, markers, outcome)
+        _dismiss_walmart_plus_checkout_splash(driver, markers)
 
         _tap_checkout_item_details_view(driver, markers, outcome)
         _increase_item_details_qty(
             driver,
             markers,
             outcome,
-            increase_by=qty_plus,
+            target_qty=sample.units_each,
             expected_items=sample.num_items,
         )
         _tap_item_details_done(driver, markers, outcome)

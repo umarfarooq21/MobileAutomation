@@ -393,6 +393,10 @@ def run_test_case_7(
             f"+{outcome.get('cart_first_qty_increased_by')} → See more slots → "
             f"last slot → 2nd payment → Continue → 2nd address → Deliver"
         )
+        if outcome.get("payment_change_skipped"):
+            outcome["message"] = outcome["message"].replace(
+                "2nd payment → Continue", "payment change SKIPPED (no 2nd card)"
+            )
         print(outcome["message"])
         return outcome
     except Exception as exc:  # noqa: BLE001
