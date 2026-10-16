@@ -41,9 +41,9 @@ _Generated from local run results by `scripts/update_readme_status.py` (runs aut
 
 | Basket | Size | Result | File |
 |---|---|---|---|
-| A | 1 × 1 | ⚪ No runs recorded | `basket_A.py` |
-| B | 10 × 1 | ⚪ No runs recorded | `basket_B.py` |
-| C | 1 × 25 | ⚪ No runs recorded | `basket_C.py` |
+| A | 1 × 1 | ✅ Pass | `basket_A.py` |
+| B | 10 × 1 | ✅ Pass | `basket_B.py` |
+| C | 1 × 25 | ✅ Pass | `basket_C.py` |
 | D | 25 × 1 | ⚪ No runs recorded | `basket_D.py` |
 | E | 5 × 10 | ⚪ No runs recorded | `basket_E.py` |
 | H | 10 × 10 | ⚪ No runs recorded | `basket_H.py` |

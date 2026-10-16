@@ -150,7 +150,7 @@ def _instacart_rows() -> list[str]:
         letter = os.path.basename(f)[len("basket_"):-3].upper()
         if letter not in SIZES:
             continue
-        results = [o for p in glob.glob(os.path.join(ARTIFACTS, f"basket_{letter}", "**", "*.json"),
+        results = [o for p in glob.glob(os.path.join(ARTIFACTS, "**", f"basket_{letter}", "*.json"),
                                          recursive=True) if (o := _load(p))]
         ok = [o for o in results if o.get("status") == "ok"]
         status = "✅ Pass" if ok else ("❌ Fail" if results else "⚪ No runs recorded")
