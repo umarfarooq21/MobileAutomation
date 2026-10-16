@@ -9,7 +9,7 @@ from selenium.common.exceptions import InvalidElementStateException
 
 from grocery_latency.ios_helpers import element_textish
 
-# Amazon iOS (the test iPhone): home search → focused TextView name=searchTextView.
+# Amazon iOS (test iPhone): home search → focused TextView name=searchTextView.
 SEARCH_TAP_STRATEGIES = (
     (AppiumBy.ACCESSIBILITY_ID, "searchTextView"),
     (AppiumBy.ACCESSIBILITY_ID, "search text field"),
