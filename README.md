@@ -2,6 +2,54 @@
 
 Python harness for cancel/test grocery latency runs on a real iPhone via Appium 2 + XCUITest.
 
+<!-- STATUS:START -->
+## Test status
+
+_Generated from local run results by `scripts/update_readme_status.py` (runs automatically on every commit). Best run per basket: an exact pass if there is one, otherwise the latest completed run._
+
+### Amazon — `test_case_amazon_final.py`
+
+**7 passed** · 1 flow-only · 0 failed · 0 not run  —  run: `python -m grocery_latency run --retailer amazon --scenario test_case_amazon_final --basket-size <A-H>`
+
+| Basket | Size | Result | Exact units | Run date | Run time | Latest run |
+|---|---|---|---|---|---|---|
+| A | 1 × 1 | ✅ Pass | ✅ 1/1 | 14 Oct 2026 | 4m 30s | same run |
+| B | 10 × 1 | ✅ Pass | ✅ 10/10 | 14 Oct 2026 | 4m 40s | same run |
+| C | 1 × 25 | ✅ Pass | ✅ 25/25 | 14 Oct 2026 | 7m 56s | same run |
+| D | 25 × 1 | ✅ Pass | ✅ 25/25 | 15 Oct 2026 | 10m 01s | same run |
+| E | 5 × 10 | ✅ Pass | ✅ 50/50 | 14 Oct 2026 | 8m 34s | same run |
+| F | 50 × 1 | ✅ Pass | ✅ 50/50 | 15 Oct 2026 | 21m 37s | same run |
+| G | 50 × 5 | ⚠️ Flow OK, not exact | ❌ 168/250 | 15 Oct 2026 | 92m 20s | same run |
+| H | 10 × 10 | ✅ Pass | ✅ 100/100 | 15 Oct 2026 | 12m 24s | same run |
+
+### Walmart — `test_case_wallmart_final.py`
+
+**8 passed** · 0 flow-only · 0 failed · 0 not run  —  run: `python -m grocery_latency run --retailer walmart --scenario test_case_wallmart_final --basket-size <A-H>`
+
+| Basket | Size | Result | Exact units | Run date | Run time | Latest run |
+|---|---|---|---|---|---|---|
+| A | 1 × 1 | ✅ Pass (exact not checked) | not recorded | 12 Oct 2026 | 3m 07s | same run |
+| B | 10 × 1 | ✅ Pass | ✅ 10/10 | 14 Oct 2026 | 5m 12s | same run |
+| C | 1 × 25 | ✅ Pass | ✅ 25/25 | 15 Oct 2026 | 5m 18s | same run |
+| D | 25 × 1 | ✅ Pass | ✅ 25/25 | 14 Oct 2026 | 5m 04s | same run |
+| E | 5 × 10 | ✅ Pass | ✅ 50/50 | 14 Oct 2026 | 9m 50s | same run |
+| F | 50 × 1 | ✅ Pass | ✅ 50/50 | 14 Oct 2026 | 7m 41s | same run |
+| G | 50 × 5 | ✅ Pass | ✅ 250/250 | 13 Oct 2026 | 20m 45s | same run |
+| H | 10 × 10 | ✅ Pass | ✅ 100/100 | 14 Oct 2026 | 25m 29s | same run |
+
+### Instacart — `basket_*.py`
+
+| Basket | Size | Result | File |
+|---|---|---|---|
+| A | 1 × 1 | ⚪ No runs recorded | `basket_A.py` |
+| B | 10 × 1 | ⚪ No runs recorded | `basket_B.py` |
+| C | 1 × 25 | ⚪ No runs recorded | `basket_C.py` |
+| D | 25 × 1 | ⚪ No runs recorded | `basket_D.py` |
+| E | 5 × 10 | ⚪ No runs recorded | `basket_E.py` |
+| H | 10 × 10 | ⚪ No runs recorded | `basket_H.py` |
+
+<!-- STATUS:END -->
+
 ## Setup
 
 ```bash
