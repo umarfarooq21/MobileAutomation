@@ -79,7 +79,10 @@ def _exact(o: dict) -> bool | None:
 
 
 def _units(o: dict) -> str:
-    total = o.get("basket_total_units")
+    # Basket size from the A–H definition (a result file's own fields can be
+    # overwritten by a mid-run item swap).
+    letter = (o.get("basket_sample") or "").strip().upper()
+    total = (SIZES[letter][0] * SIZES[letter][1]) if letter in SIZES else o.get("basket_total_units")
     got = (o.get("checkout_units_after_cart_qty") or o.get("place_order_units")
            or (o.get("checkout_units") if int(o.get("basket_units_each") or 0) <= 1 else None))
     if got is None and _exact(o) and total:
