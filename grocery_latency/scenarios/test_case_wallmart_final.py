@@ -70,7 +70,7 @@ from grocery_latency.scenarios.test_case_walmart_1 import (
     _wait_cart_screen,
     _wait_checkout_screen,
 )
-from grocery_latency.scenarios.test_case_walmart_2 import BASKET_SAMPLES
+from grocery_latency.scenarios.test_case_walmart_2 import BASKET_SAMPLES, BasketSample
 from grocery_latency.scenarios.test_case_walmart_4 import (
     ItemDetailsClosed,
     _dismiss_tech_issue_alert,
@@ -1218,6 +1218,124 @@ def _open_cart_fast(driver, markers: MarkerLog, outcome: dict) -> None:
     _open_cart(driver, markers, outcome)
 
 
+# Baskets whose items are checked against their per-order limit while
+# adding (C is always checked because its target is above 12).
+PROBE_LIMIT_BASKETS = frozenset({"G"})
+
+
+def _unavailable_banner(root) -> bool:
+    """Cart warning: "1 item in your cart is currently unavailable." """
+    return root is not None and any(
+        "currently unavailable" in (n.get("label") or "").lower()
+        for n in root.iter("XCUIElementTypeStaticText")
+    )
+
+
+def _out_of_stock_lines(root, h: float) -> list[tuple[str, tuple[float, float]]]:
+    """Cart lines marked "Out of stock" → (product, its Remove point). The
+    note sits in the line's tile, above that line's Remove button."""
+    if root is None:
+        return []
+    notes = [
+        _node_center(n)[1]
+        for n in root.iter("XCUIElementTypeStaticText")
+        if (n.get("label") or "").strip().lower() == "out of stock"
+    ]
+    removes = []
+    for node in root.iter("XCUIElementTypeButton"):
+        if (node.get("name") or "") != "CartItemTileActionsView.remove":
+            continue
+        product = (node.get("label") or "")[len("Remove, "):].strip()
+        removes.append((product, _node_center(node)))
+    out: list[tuple[str, tuple[float, float]]] = []
+    for ny in notes:
+        below = [r for r in removes if 0 < r[1][1] - ny < 220]
+        if not below:
+            continue
+        product, pt = min(below, key=lambda r: r[1][1] - ny)
+        if _REMOVE_MIN_Y <= pt[1] <= h * 0.80 and product not in [o[0] for o in out]:
+            out.append((product, pt))
+    return out
+
+
+def _replace_unavailable_lines(
+    driver, markers: MarkerLog, outcome: dict, *, sample, query: str | None
+) -> None:
+    """Before recording: out-of-stock lines would be moved to Saved for later
+    at checkout ("1 item update" sheet, 20 Oct 2026) and the basket would end
+    short. Remove each one (confirmed) and add the same number of in-stock
+    replacements from the search, then re-check — up to 3 rounds."""
+    try:
+        h = float((driver.get_window_size() or {}).get("height") or 844)
+    except Exception:  # noqa: BLE001
+        h = 844.0
+    replaced: list[str] = []
+    for rnd in range(3):
+        root = _snapshot(driver)
+        if not _unavailable_banner(root):
+            break
+        print(f"Step: cart has unavailable item(s) — removing and replacing (round {rnd + 1}) …")
+        removed: list[str] = []
+        last_sig = None
+        for _scan in range(40):
+            root = _snapshot(driver)
+            lines = [l for l in _out_of_stock_lines(root, h) if l[0] not in removed]
+            if lines:
+                for product, pt in lines:
+                    _w3c_taps(driver, [pt], gap=0.0)
+                    gone, root2, blocked = _wait_line_gone(driver, product)
+                    if blocked and root2 is not None:
+                        _close_unable_to_remove(driver, markers, root2)
+                        root3 = _snapshot(driver)
+                        sfl = _save_for_later_button(root3, product) if root3 is not None else None
+                        if sfl is not None:
+                            _w3c_taps(driver, [_node_center(sfl)], gap=0.0)
+                            gone, _r, _b = _wait_line_gone(driver, product)
+                    if gone:
+                        removed.append(product)
+                        markers.mark("unavailable_line_removed", product=product[:60])
+                        print(f"  removed out-of-stock line: {product[:50]!r}")
+                    else:
+                        print(f"  could not remove {product[:50]!r}")
+                        removed.append(product)  # don't loop on it
+                continue
+            sig = _cart_signature(root) if root is not None else None
+            if sig is not None and sig == last_sig:
+                break  # bottom of the cart
+            last_sig = sig
+            _scroll_down(driver, percent=0.45)
+            time.sleep(0.6)
+        gone_now = [p for p in removed]
+        if not gone_now:
+            print("  unavailable banner shown but no out-of-stock line found — continuing")
+            break
+        replaced += gone_now
+        n = len(gone_now)
+        print(f"  adding {n} in-stock replacement(s) …")
+        if query:
+            _search_my_items(driver, markers, outcome, query)
+        else:
+            _search_my_items(driver, markers, outcome)
+        keep = {k: outcome.get(k) for k in (
+            "items_added_count", "basket_exact", "basket_add_elapsed_seconds",
+            "cart_badge_units_before_add", "cart_badge_units_after_add",
+            "cart_badge_units_added", "fill_summary")}
+        try:
+            _add_basket_fast(
+                driver, markers, outcome,
+                sample=BasketSample(sample.letter, n, sample.units_each),
+                listing_units=1, query=query,
+                probe_units=sample.units_each
+                if (sample.units_each > 12 or sample.letter in PROBE_LIMIT_BASKETS) else None,
+            )
+        finally:
+            outcome.update(keep)
+        _open_cart_fast(driver, markers, outcome)
+    outcome["unavailable_replaced"] = replaced
+    if replaced:
+        print(f"  replaced {len(replaced)} unavailable line(s): {[r[:30] for r in replaced]}")
+
+
 def run_test_case_walmart_6(
     settings: Settings,
     retailer: str,
@@ -1397,6 +1515,11 @@ def run_test_case_walmart_6(
 
         t = time.monotonic()
         big = sample.units_each > 12
+        # Check each item can reach its target while adding (raise to the
+        # target, back to ×1; an item that can't is removed and replaced) —
+        # always for >12 (C), and for G: a ×5 line capped at 3 ("Realgood
+        # Flautas", 20 Oct 2026) made the Item details raise loop.
+        probe = sample.units_each if (big or sample.letter in PROBE_LIMIT_BASKETS) else None
         terms = C_SEARCH_TERMS if big else (None,)
         try:
             driver.update_settings(
@@ -1416,7 +1539,7 @@ def run_test_case_walmart_6(
                         # Walmart's usual per-item cap is 12: pre-check bigger
                         # targets, and move on to the next search term after
                         # a few capped products.
-                        probe_units=sample.units_each if big else None,
+                        probe_units=probe,
                         query=term,
                         max_probe_misses=3 if big else None,
                     )
@@ -1439,6 +1562,13 @@ def run_test_case_walmart_6(
 
         t = time.monotonic()
         _open_cart_fast(driver, markers, outcome)
+        # Out-of-stock lines get dropped at checkout — swap them out before
+        # recording so the basket stays exact.
+        _replace_unavailable_lines(
+            driver, markers, outcome, sample=sample,
+            query=outcome.get("search_query_used")
+            if outcome.get("search_query_used") not in (None, "low cost products") else None,
+        )
         phases["open_cart"] = time.monotonic() - t
 
         print(f"START RECORDING at Cart page (limit {rec_limit}s) …")

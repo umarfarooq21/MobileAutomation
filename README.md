@@ -13,14 +13,14 @@ _Generated from local run results by `scripts/update_readme_status.py` (runs aut
 
 | Basket | Size | Result | Exact units | Run date | Run time | Latest run |
 |---|---|---|---|---|---|---|
-| A | 1 × 1 | ✅ Pass | ✅ 1/1 | 19 Oct 2026 | 3m 18s | same run |
-| B | 10 × 1 | ✅ Pass | ✅ 10/10 | 19 Oct 2026 | 5m 29s | same run |
-| C | 1 × 25 | ✅ Pass | ✅ 25/25 | 19 Oct 2026 | 7m 27s | same run |
-| D | 25 × 1 | ✅ Pass | ✅ 25/25 | 19 Oct 2026 | 10m 53s | same run |
-| E | 5 × 10 | ✅ Pass | ✅ 50/50 | 19 Oct 2026 | 8m 21s | same run |
-| F | 50 × 1 | ✅ Pass | ✅ 50/50 | 15 Oct 2026 | 21m 37s | same run |
+| A | 1 × 1 | ✅ Pass | ✅ 1/1 | 20 Oct 2026 | 3m 58s | same run |
+| B | 10 × 1 | ✅ Pass | ✅ 10/10 | 19 Oct 2026 | 4m 56s | same run |
+| C | 1 × 25 | ✅ Pass | ✅ 25/25 | 20 Oct 2026 | 7m 57s | same run |
+| D | 25 × 1 | ✅ Pass | ✅ 25/25 | 20 Oct 2026 | 11m 21s | same run |
+| E | 5 × 10 | ✅ Pass | ✅ 50/50 | 20 Oct 2026 | 9m 40s | same run |
+| F | 50 × 1 | ✅ Pass | ✅ 50/50 | 20 Oct 2026 | 23m 03s | same run |
 | G | 50 × 5 | ⚠️ Flow OK, not exact | ❌ 168/250 | 15 Oct 2026 | 92m 20s | same run |
-| H | 10 × 10 | ✅ Pass | ✅ 100/100 | 15 Oct 2026 | 12m 24s | same run |
+| H | 10 × 10 | ✅ Pass | ✅ 100/100 | 20 Oct 2026 | 21m 17s | same run |
 
 ### Walmart — `test_case_wallmart_final.py`
 
@@ -34,7 +34,7 @@ _Generated from local run results by `scripts/update_readme_status.py` (runs aut
 | D | 25 × 1 | ✅ Pass | ✅ 25/25 | 14 Oct 2026 | 5m 04s | same run |
 | E | 5 × 10 | ✅ Pass | ✅ 50/50 | 14 Oct 2026 | 9m 50s | same run |
 | F | 50 × 1 | ✅ Pass | ✅ 50/50 | 14 Oct 2026 | 7m 41s | same run |
-| G | 50 × 5 | ✅ Pass | ✅ 250/250 | 13 Oct 2026 | 20m 45s | same run |
+| G | 50 × 5 | ✅ Pass | ✅ 250/250 | 13 Oct 2026 | 20m 45s | 20 Oct 2026: failed — Could not reach the Checkout screen |
 | H | 10 × 10 | ✅ Pass | ✅ 100/100 | 14 Oct 2026 | 25m 29s | same run |
 
 ### Instacart — `basket_*.py`

@@ -37,6 +37,18 @@ SCENARIOS = (
     "test_case_walmart_6",
     "test_case_amazon_final",  # file test_case_amazon_final.py (was test_case_7_2)
     "test_case_wallmart_final",  # file test_case_wallmart_final.py (was test_case_walmart_6)
+    "basket_A",  # Instacart basket A (scenarios/basket_A.py)
+    "test_case_A_instacart",
+    "basket_B",  # Instacart basket B (scenarios/basket_B.py)
+    "test_case_B_instacart",
+    "basket_C",  # Instacart basket C (scenarios/basket_C.py)
+    "test_case_C_instacart",
+    "basket_D",  # Instacart basket D (scenarios/basket_D.py)
+    "test_case_D_instacart",
+    "basket_E",  # Instacart basket E (scenarios/basket_E.py)
+    "test_case_E_instacart",
+    "basket_H",  # Instacart basket H (scenarios/basket_H.py)
+    "test_case_H_instacart",
     "task1_add_grocery_to_cart",
     "task1_cart_checkout_cancel",
 )
@@ -168,5 +180,5 @@ def load_settings(env_file: Path | None = None) -> Settings:
         amazon_asins=_parse_asins(asin_raw),
         amazon_bundle_id=os.getenv("AMAZON_BUNDLE_ID", "com.amazon.Amazon").strip(),
         walmart_bundle_id=os.getenv("WALMART_BUNDLE_ID", "com.walmart.electronics").strip(),
-        instacart_bundle_id=os.getenv("INSTACART_BUNDLE_ID", "com.instacart.Instacart").strip(),
+        instacart_bundle_id=os.getenv("INSTACART_BUNDLE_ID", "com.instacart").strip(),
     )

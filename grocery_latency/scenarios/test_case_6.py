@@ -629,6 +629,92 @@ def _select_last_delivery_slot(driver, markers: MarkerLog, outcome: dict) -> boo
     return True
 
 
+def _select_last_listed_slot_option(driver, markers: MarkerLog, outcome: dict) -> bool:
+    """No "See more delivery slots": use the listed delivery options
+    ("Today/Tomorrow <time> … Delivery").
+
+    One option → it is already the selected (and last) slot; accept it with
+    no tap. Several → tap the bottom-most one, only once it is really on
+    screen (the web view's positions can be stale — seen 19 Oct 2026: the
+    option on screen at y≈420 was reported at y=1060). Taps stay in the
+    middle of the page, well away from "Place your order"."""
+    print("  no See more link — using the listed delivery options …")
+    try:
+        h = float((driver.get_window_size() or {}).get("height") or 844)
+    except Exception:  # noqa: BLE001
+        h = 844.0
+
+    def _options() -> list[tuple[float, float, str]]:
+        found: list[tuple[float, float, str]] = []
+        try:
+            els = driver.find_elements(
+                AppiumBy.IOS_PREDICATE,
+                '(label BEGINSWITH[c] "Today " OR label BEGINSWITH[c] "Tomorrow ") '
+                'AND (label CONTAINS "AM" OR label CONTAINS "PM")',
+            )
+        except Exception:  # noqa: BLE001
+            els = []
+        for el in els[:12]:
+            try:
+                lab = (el.get_attribute("label") or "").strip()
+                r = el.rect or {}
+                cy = float(r.get("y", 0)) + float(r.get("height", 0)) / 2.0
+                cx = float(r.get("x", 0)) + min(float(r.get("width", 0)), 200.0) / 2.0
+            except Exception:  # noqa: BLE001
+                continue
+            # One entry per option: "Tomorrow 3 PM - 6 PM" and its
+            # "… $12.99 Delivery" container are the same option.
+            key = _flat_slot_label(lab).split("$")[0].strip().lower()
+            if not any(_flat_slot_label(o[2]).split("$")[0].strip().lower() == key
+                       for o in found):
+                found.append((cx, cy, lab))
+        found.sort(key=lambda o: o[1])
+        return found
+
+    options = _options()
+    if not options:
+        _mark_step(outcome, "last_delivery_slot", status="failed",
+                   reason="no See more link and no listed delivery option")
+        markers.mark("last_delivery_slot_failed", reason="no_options")
+        print("  no delivery options listed")
+        return False
+
+    via = "only_option_already_selected"
+    if len(options) > 1:
+        via = "tapped_last_listed_option"
+        for _ in range(3):
+            cx, cy, lab = options[-1]
+            if 120 <= cy <= h * 0.80:
+                _tap_center(driver, cx, cy)
+                time.sleep(0.3)
+                break
+            _scroll_slots_into_view(driver, direction="down" if cy > h * 0.80 else "up")
+            time.sleep(0.4)
+            options = _options() or options
+        else:
+            _mark_step(outcome, "last_delivery_slot", status="failed",
+                       reason="last listed option never came on screen")
+            print("  last listed delivery option never came on screen")
+            return False
+    lab = options[-1][2]
+    flat = _flat_slot_label(lab)[:80]
+    markers.mark("last_delivery_slot_tapped", label=flat, index=len(options) - 1,
+                 total=len(options), via=via)
+    _mark_step(outcome, "last_delivery_slot", status="ok", label=flat,
+               total=len(options), via=via)
+    _mark_step(outcome, "see_more_delivery_slots", status="skipped",
+               reason="Amazon showed no See more link")
+    outcome["delivery_slot_changed"] = True
+    outcome["delivery_slot_label"] = flat
+    outcome["delivery_slot_total"] = len(options)
+    outcome["see_more_delivery_slots_missing"] = True
+    if via == "only_option_already_selected":
+        print(f"  only one delivery option listed — already selected: {flat!r}")
+    else:
+        print(f"  selected last listed option ({len(options)} listed): {flat!r}")
+    return True
+
+
 def _expand_and_select_last_slot(
     driver, markers: MarkerLog, outcome: dict
 ) -> bool:
@@ -637,7 +723,10 @@ def _expand_and_select_last_slot(
         return True
     # Skip pre-scroll / extra dismiss — See more is usually already visible.
     if not _tap_see_more_delivery_slots(driver, markers, outcome):
-        return False
+        # Amazon sometimes offers a single delivery option with no "See more"
+        # link (seen 19 Oct 2026: only "Tomorrow 3 PM - 6 PM"). Pick the last
+        # option that is listed instead of failing.
+        return _select_last_listed_slot_option(driver, markers, outcome)
     time.sleep(0.12)
     return _select_last_delivery_slot(driver, markers, outcome)
 
@@ -840,6 +929,49 @@ def _recover_amazon_error_page(driver, markers: MarkerLog | None = None) -> bool
     return hit
 
 
+def _confirm_first_address(driver, markers: MarkerLog) -> bool:
+    """On "Select a delivery address": select the FIRST (top) address and
+    tap "Deliver to this address". The address page has no order button."""
+    print("  address page first — selecting the FIRST address to reach Place Your Order …")
+    rows: list[tuple[float, object]] = []
+    try:
+        for el in driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'label CONTAINS[c] "Phone number" OR name CONTAINS[c] "Phone number"',
+        )[:8]:
+            try:
+                y = float((el.rect or {}).get("y", 0))
+            except Exception:  # noqa: BLE001
+                continue
+            if y > 90 and not any(abs(y - r[0]) < 24 for r in rows):
+                rows.append((y, el))
+    except Exception:  # noqa: BLE001
+        rows = []
+    if not rows:
+        print("  no address rows found")
+        return False
+    rows.sort(key=lambda t: t[0])
+    try:
+        rows[0][1].click()
+    except Exception:  # noqa: BLE001
+        return False
+    time.sleep(0.8)
+    hit = _fast_scroll_find_tap(
+        driver,
+        ((AppiumBy.ACCESSIBILITY_ID, "Deliver to this address"),
+         (AppiumBy.ACCESSIBILITY_ID, "Use this address")),
+        scrolls=1, timeout=2.0,
+    )
+    if not hit:
+        print("  Deliver to this address not found for the first address")
+        return False
+    markers.mark("first_address_confirmed_to_reach_place_order")
+    print("  first address → Deliver to this address (2nd address comes at the end)")
+    time.sleep(1.0)
+    return True
+
+
+
 def _tc6_checkout_edits(driver, markers: MarkerLog, outcome: dict) -> None:
     """TC5 checkout plus expand delivery slots and select the last one."""
     _recover_amazon_error_page(driver, markers)
@@ -972,9 +1104,17 @@ def _tc6_checkout_edits(driver, markers: MarkerLog, outcome: dict) -> None:
                 continue
 
         if screen == "address":
-            if not address_done:
-                # Amazon may open "Select a delivery address" straight after
-                # Proceed — pick the 2nd address + Deliver to this address here.
+            if not address_done and not (slot_done and payment_done):
+                # Address page came FIRST (Amazon remembers the last run's
+                # 2nd address). Picking the 2nd address now can make items
+                # unshippable ("can't be shipped to the address you
+                # selected") and Place Your Order never shows — so take the
+                # FIRST address to reach Place Your Order; the switch to the
+                # 2nd address happens at the end from Place Your Order.
+                if not _confirm_first_address(driver, markers):
+                    _handle_address_screen(driver, markers, outcome)
+                    address_done = True
+            elif not address_done:
                 _handle_address_screen(driver, markers, outcome)
                 address_done = True
             elif not (slot_done and payment_done):
@@ -1011,6 +1151,13 @@ def _tc6_checkout_edits(driver, markers: MarkerLog, outcome: dict) -> None:
                     continue
                 payment_done = True
             if not address_done:
+                # Caller work that must happen on Place Your Order BEFORE the
+                # address change (e.g. TC7_2 basket C's ×25 raise — the 2nd
+                # address can make items unshippable, which replaces Place
+                # Your Order with "Make updates to your items").
+                hook = outcome.pop("_before_address_hook", None)
+                if callable(hook):
+                    hook()
                 if not _open_address_from_place_order(driver, markers, outcome):
                     raise AssertionError(
                         "Could not open Change delivery address on Place Your Order"
@@ -1257,7 +1404,7 @@ def run_test_case_6(
         )
         if outcome.get("payment_change_skipped"):
             outcome["message"] = outcome["message"].replace(
-                "2nd payment → Continue", "payment change SKIPPED (no 2nd card)"
+                "2nd payment → Continue", "payment change SKIPPED"
             )
         print(outcome["message"])
         return outcome

@@ -164,7 +164,8 @@ _QTY_TEXT_PRED = (
 _QTY_SHEET_PRED = (
     'visible == 1 AND (label CONTAINS[c] "limit of" OR '
     'label CONTAINS[c] "Quantity not updated" OR '
-    'label CONTAINS[c] "maximum quantity")'
+    'label CONTAINS[c] "maximum quantity" OR '
+    'label CONTAINS[c] "of these available")'
 )
 # Each + is its own server update: rapid taps come back "Quantity not
 # updated" and the cart ends up short. One confirmed step at a time.
@@ -419,7 +420,7 @@ def _grid_raise(driver, plus: tuple[float, float], target: int,
                 sheet = _qty_sheet(driver)
                 if sheet:
                     _close_qty_sheet(driver)
-                    if "limit" in sheet.lower() or "maximum" in sheet.lower():
+                    if _is_limit_text(sheet):
                         return qty, "limit"
         if moved:
             retries = 0
@@ -520,7 +521,7 @@ def _collect_add_to_cart(
             '(name == "Add To Cart" OR name == "+" OR label == "+") '
             # On screen only: carousels keep their off-screen tiles (x≫390)
             # in the tree, and tapping those hits nothing.
-            'AND rect.y > 140 AND rect.y < 600 AND rect.x > 0 AND rect.x < 370',
+            'AND rect.y > 180 AND rect.y < 600 AND rect.x > 0 AND rect.x < 370',
         )
     except Exception:  # noqa: BLE001
         return out
@@ -544,7 +545,10 @@ def _collect_add_to_cart(
             cx, cy, _r = _rect_center(el)
         except Exception:  # noqa: BLE001
             continue
-        if cy < 160 or cy > 610 or not (8 <= cx <= 382):
+        # cy < 200: the tile's + sits under the sticky aisle tab row (y≈168);
+        # a tap there hits the tabs, not the Add (missed Adds at y=162–178,
+        # 19 Oct 2026). It comes into the clear band after the next scroll.
+        if cy < 200 or cy > 610 or not (8 <= cx <= 382):
             continue
         if deal_band and deal_band[0] <= cy <= deal_band[1]:
             continue
@@ -806,6 +810,18 @@ def _add_basket_scaled_fast(
             continue
         if not batch:
             dry_scrolls += 1
+            # An aisle can be empty on Amazon's side ("Our shelves are
+            # restocking…", seen 19 Oct 2026) — don't scroll it, move on.
+            try:
+                if driver.find_elements(
+                    AppiumBy.IOS_PREDICATE,
+                    'label CONTAINS[c] "shelves are restocking"',
+                ):
+                    print("  aisle is restocking (empty) — switching aisle")
+                    markers.mark("grocery_aisle_restocking")
+                    dry_scrolls = 6
+            except Exception:  # noqa: BLE001
+                pass
             if dry_scrolls >= 6:
                 # This aisle has no unused Add To Cart left.
                 if not _switch_aisle(driver, markers, aisles_tried):
@@ -877,7 +893,7 @@ def _add_basket_scaled_fast(
                 low = sheet.lower()
                 _close_qty_sheet(driver)
                 new = _stepper_near(driver, cx, cy) or new
-                if "limit" in low or "maximum" in low:
+                if _is_limit_text(low):
                     capped = True
                     if new and new["qty"] is not None:
                         qty, st = new["qty"], new
@@ -1192,6 +1208,20 @@ def _pyo_find_row(root, row: dict, h: float) -> dict | None:
 _PYO_MARKERS: list = [None]  # MarkerLog for the step helper (set per run)
 
 
+def _pyo_wait_on_page(driver, timeout: float = 25.0):
+    """Snapshot of Place Your Order once it has (re)loaded, else None.
+
+    After "Deliver to this address" / payment Continue the page reloads for
+    several seconds; a single read then misses the "Place Your Order" title
+    and the guard wrongly reported "left_place_order" (19 Oct 2026)."""
+    end = time.monotonic() + timeout
+    root = _pyo_snapshot(driver)
+    while not _pyo_on_page(root) and time.monotonic() < end:
+        time.sleep(1.0)
+        root = _pyo_snapshot(driver)
+    return root if _pyo_on_page(root) else None
+
+
 def _pyo_step_up(driver, row: dict, h: float) -> tuple[int, str]:
     """One + on Place Your Order, confirmed from snapshots. → (qty, status).
 
@@ -1205,8 +1235,8 @@ def _pyo_step_up(driver, row: dict, h: float) -> tuple[int, str]:
     if not _pyo_wait_spinner(driver, _PYO_MARKERS[0], max_wait=_PYO_HANG_WAIT):
         return qty, "hung"
     for _ in range(4):
-        root = _pyo_snapshot(driver)
-        if not _pyo_on_page(root):
+        root = _pyo_wait_on_page(driver)
+        if root is None:
             return qty, "left_place_order"
         sheet = _pyo_sheet(root)
         if sheet:
@@ -1242,7 +1272,10 @@ def _pyo_step_up(driver, row: dict, h: float) -> tuple[int, str]:
             end = time.monotonic() + _PYO_STEP_TIMEOUT
         root = _pyo_snapshot(driver)
         if not _pyo_on_page(root):
-            return qty, "left_place_order"
+            # Mid-reload after the tap — wait for the page, don't abort.
+            root = _pyo_wait_on_page(driver, timeout=15.0)
+            if root is None:
+                return qty, "left_place_order"
         sheet = _pyo_sheet(root)
         if sheet:
             _close_qty_sheet(driver)
@@ -1359,7 +1392,7 @@ def _raise_qty_on_place_order(
                 if retries >= _PYO_STEP_RETRIES:
                     break
                 continue
-            if sheet and ("limit" in sheet.lower() or "maximum" in sheet.lower()):
+            if sheet and _is_limit_text(sheet):
                 capped = True
                 break
             if new_qty > before:
@@ -1574,6 +1607,49 @@ def _cart_line_qty(
     return None, None
 
 
+def _is_limit_text(text: str) -> bool:
+    """Amazon purchase-limit wording: "limit of N per customer", "maximum
+    quantity", "This seller has only 2 of these available" (19 Oct 2026)."""
+    low = (text or "").lower()
+    return "limit" in low or "maximum" in low or "of these available" in low
+
+
+class LeftCartDuringRaise(AssertionError):
+    """The app left the Cart (e.g. into checkout) while raising quantities."""
+
+
+def _cart_tap_safe(driver, x: float, y: float) -> str:
+    """"" if a Cart + tap at (x, y) is safe, else the reason.
+
+    The Cart pins a "Proceed to checkout (N items)" bar at the top once
+    scrolled; a stale + position tapped it and opened checkout (19 Oct
+    2026, basket E). Before every tap: still on the Cart (no Place Your
+    Order page), below the pinned bar, and clear of any checkout button."""
+    if y < 200:
+        return "under the pinned Proceed bar"
+    try:
+        if driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeNavigationBar" AND name BEGINSWITH "Place Your Order"',
+        ) or driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND '
+            '(label ==[c] "Place your order" OR name ==[c] "Place your order")',
+        ):
+            return "left_cart"
+        near = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND '
+            '(label BEGINSWITH[c] "Proceed to checkout" OR name BEGINSWITH[c] "Proceed to checkout") '
+            f"AND rect.y > {int(y) - 90} AND rect.y < {int(y) + 50}",
+        )
+        if near:
+            return "too close to Proceed to checkout"
+    except Exception:  # noqa: BLE001
+        return "could not verify"
+    return ""
+
+
 def _raise_qty_on_cart(
     driver, markers: MarkerLog, outcome: dict, *, sample: BasketSample,
     tap=None,
@@ -1617,6 +1693,16 @@ def _raise_qty_on_cart(
             # whatever is there (it opened "Amazon Now"). On-screen only.
             if not (150 <= plus_now[1] <= h * 0.85):
                 break  # the sweep scrolls it into view and comes back
+            unsafe = _cart_tap_safe(driver, *plus_now)
+            if unsafe == "left_cart":
+                markers.mark("cart_raise_left_cart", product=row["name"][:60])
+                raise LeftCartDuringRaise(
+                    "Left the Cart while raising quantities (checkout opened) — "
+                    "stopped without tapping"
+                )
+            if unsafe:
+                print(f"  skip + for {row['name'][:30]!r}: {unsafe}")
+                break  # the sweep scrolls / re-reads and comes back
             (tap or _tap_xy)(driver, *plus_now)
             taps += 1
             t_tap = time.monotonic()
@@ -1635,7 +1721,7 @@ def _raise_qty_on_cart(
                     sheet = _qty_sheet(driver)
                     if sheet:
                         _close_qty_sheet(driver)
-                        if "limit" in sheet.lower() or "maximum" in sheet.lower():
+                        if _is_limit_text(sheet):
                             capped.add(row["name"])
                             break
                 time.sleep(0.1)
@@ -1763,6 +1849,54 @@ def _cart_says_empty(driver) -> bool:
         return False
 
 
+def _leave_checkout_if_open(driver, markers: MarkerLog | None = None) -> bool:
+    """If checkout (Place Your Order / its Prime sheet) is open, leave it ONLY
+    via the header's Cancel / Back button (never anything on the page), then
+    reopen the Cart. True if it had to leave."""
+    try:
+        if not driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeNavigationBar" AND name BEGINSWITH "Place Your Order"',
+        ):
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    print("  checkout opened unexpectedly — leaving via header Cancel/Back (no other taps)")
+    if markers is not None:
+        markers.mark("left_checkout_via_header")
+    for _ in range(3):
+        tapped = False
+        try:
+            for el in driver.find_elements(
+                AppiumBy.IOS_PREDICATE,
+                'type == "XCUIElementTypeButton" AND rect.y < 110 AND '
+                '(label ==[c] "Cancel" OR name ==[c] "Cancel" OR label ==[c] "Back" '
+                'OR name == "BackButton")',
+            )[:1]:
+                el.click()
+                tapped = True
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(2.0)
+        try:
+            still = driver.find_elements(
+                AppiumBy.IOS_PREDICATE,
+                'type == "XCUIElementTypeNavigationBar" AND name BEGINSWITH "Place Your Order"',
+            )
+        except Exception:  # noqa: BLE001
+            still = []
+        if not still:
+            break
+        if not tapped:
+            break
+    try:
+        driver.find_element(AppiumBy.ACCESSIBILITY_ID, "cartTab").click()
+        time.sleep(2.0)
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
 def _clear_cart_lines(driver, markers: MarkerLog, outcome: dict) -> None:
     """Delete every cart line via its own "Delete <product>" button.
 
@@ -1807,6 +1941,8 @@ def _clear_cart_lines(driver, markers: MarkerLog, outcome: dict) -> None:
 
     for _ in range(300):
         target = None
+        if _leave_checkout_if_open(driver, markers):
+            continue
         try:
             dels = driver.find_elements(
                 AppiumBy.IOS_PREDICATE,
@@ -1843,6 +1979,13 @@ def _clear_cart_lines(driver, markers: MarkerLog, outcome: dict) -> None:
             continue
         empty_screens = 0
         product, cx, cy = target
+        # Same guard as the + taps: a stale Delete position tapped the
+        # pinned "Proceed to checkout" bar and opened checkout (19 Oct 2026).
+        unsafe = _cart_tap_safe(driver, cx, cy)
+        if unsafe:
+            if unsafe != "left_cart":
+                _cart_drag(driver, frac=0.25)
+            continue
         _tap_xy(driver, cx, cy)
         gone_pred = (
             f'type == "XCUIElementTypeButton" AND name == "Delete {_q(product)}" '
@@ -1912,6 +2055,110 @@ def _open_grocery_aisle(driver, markers: MarkerLog, outcome: dict, aisle: str) -
         tried = {a for a in _NEXT_AISLES if a != aisle}
         if not _switch_aisle(driver, markers, tried):
             print(f"  aisle {aisle!r} not found — staying on Produce")
+
+
+_LOW_STOCK_RE = re.compile(r"Only (\d+) left", re.I)
+
+
+def _cart_low_stock_lines(driver, h: float, need: int) -> list[tuple[str, int, float, float]]:
+    """Cart lines on screen marked "Only N left" with N < need →
+    [(product, N, delete_x, delete_y)]. The note sits in the line's tile,
+    above its Delete button."""
+    out: list[tuple[str, int, float, float]] = []
+    try:
+        notes = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            f'label CONTAINS[c] "Only " AND label CONTAINS[c] " left" '
+            f"AND rect.y > 140 AND rect.y < {int(h * 0.85)}",
+        )
+    except Exception:  # noqa: BLE001
+        return out
+    for note in notes[:6]:
+        try:
+            m = _LOW_STOCK_RE.search(note.get_attribute("label") or "")
+            if not m or int(m.group(1)) >= need:
+                continue
+            ny = float((note.rect or {}).get("y", 0))
+            dels = driver.find_elements(
+                AppiumBy.IOS_PREDICATE,
+                'type == "XCUIElementTypeButton" AND name BEGINSWITH "Delete " '
+                f"AND rect.y > {int(ny) - 10} AND rect.y < {int(ny) + 260}",
+            )
+            if not dels:
+                continue
+            product = (dels[0].get_attribute("name") or "")[len("Delete "):].strip()
+            dx, dy, _r = _rect_center(dels[0])
+            # Same rule as the + taps: never under the pinned Proceed bar or
+            # near a checkout button.
+            if not (200 <= dy <= h * 0.85) or _cart_tap_safe(driver, dx, dy):
+                continue
+            if product and not any(o[0] == product for o in out):
+                out.append((product, int(m.group(1)), dx, dy))
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def _replace_low_stock_lines(
+    driver, markers: MarkerLog, outcome: dict, *, sample: BasketSample
+) -> None:
+    """Before recording (E/H): a line that can't reach ×units_each ("Only 2
+    left" → "This seller has only 2 of these available") is deleted and a
+    product from another aisle added in its place, so the Cart raise can be
+    exact. Up to 3 rounds."""
+    try:
+        h = float((driver.get_window_size() or {}).get("height") or 844)
+    except Exception:  # noqa: BLE001
+        h = 844.0
+    aisles = [a for a in _BATCH_AISLES if a != "Produce"]
+    replaced: list[str] = []
+    for rnd in range(3):
+        _cart_scroll_to_top(driver)
+        low: list[tuple[str, int, float, float]] = []
+        for _ in range(sample.num_items + 4):
+            found = _cart_low_stock_lines(driver, h, sample.units_each)
+            for item in found:
+                if not any(l[0] == item[0] for l in low):
+                    low.append(item)
+            if found:
+                break  # delete what is on screen first (positions are fresh)
+            if _proceed_checkout_units(driver) is None and _cart_says_empty(driver):
+                break
+            _cart_drag(driver, frac=0.30)
+            if _cart_top_on_screen(driver):
+                break
+        if not low:
+            break
+        deleted = 0
+        for product, n, dx, dy in low:
+            print(f"  low stock: {product[:40]!r} only {n} left (< ×{sample.units_each}) — replacing")
+            markers.mark("low_stock_line", product=product[:60], left=n)
+            _tap_xy(driver, dx, dy)
+            time.sleep(2.0)
+            deleted += 1
+            replaced.append(product)
+        aisle = aisles[rnd % len(aisles)]
+        _go_home_tab(driver)
+        _open_grocery_aisle(driver, markers, outcome, aisle)
+        # The add helper rewrites the basket's add bookkeeping — keep the
+        # main basket's numbers (a swap doesn't change how many lines exist).
+        keep = {k: outcome.get(k) for k in (
+            "items_added_count", "items_added", "basket_add_elapsed_seconds",
+            "basket_units_confirmed", "asin_add_strategy", "basket_sample",
+            "basket_num_items", "basket_units_each", "basket_total_units",
+            "cart_count_before_adds")}
+        try:
+            _add_basket_scaled_fast(
+                driver, markers, outcome,
+                sample=BasketSample(sample.letter, deleted, 1),
+                max_scrolls=12, source=f"replacement_{aisle}", listing_units=1,
+            )
+        finally:
+            outcome.update(keep)
+        _open_cart_page(driver, markers, outcome)
+    outcome["low_stock_replaced"] = replaced
+    if replaced:
+        print(f"  replaced {len(replaced)} low-stock line(s): {[r[:30] for r in replaced]}")
 
 
 def _add_and_raise_in_batches(
@@ -1988,6 +2235,55 @@ def _add_basket_produce_or_search(
         source="grocery_produce_plus",
         listing_units=1,  # units are raised on Place Your Order (recorded)
     )
+
+
+_AFTER_ADDRESS_TIMEOUT = 45.0
+_RECORDING_TAIL_HOLD = 4.0  # iOS recordings drop the last 1–2 s of frames
+
+
+def _wait_after_address_change(driver, markers: MarkerLog, outcome: dict) -> None:
+    """Wait (no taps) until the address picker and its spinner are gone and
+    the next page — Place Your Order, or Amazon's "Make updates to your
+    items" when the new address can't take an item — has loaded and is
+    steady on two reads in a row; then hold a few seconds so the end of the
+    recording shows it."""
+    print("Step: wait for the page after the address change to finish loading …")
+    t0 = time.monotonic()
+    steady = 0
+    last = None
+    screen = "unknown"
+    while time.monotonic() - t0 < _AFTER_ADDRESS_TIMEOUT:
+        try:
+            navs = [
+                (e.get_attribute("name") or "")
+                for e in driver.find_elements(
+                    AppiumBy.IOS_PREDICATE, 'type == "XCUIElementTypeNavigationBar"'
+                )[:3]
+            ]
+        except Exception:  # noqa: BLE001
+            navs = []
+        title = next((n for n in navs if n), "")
+        on_picker = "delivery address" in title.lower()
+        spinner = _pyo_spinner_visible(driver)
+        if title and not on_picker and not spinner:
+            steady = steady + 1 if title == last else 1
+            last = title
+            if steady >= 2:
+                screen = title
+                break
+        else:
+            steady = 0
+            last = None
+        time.sleep(1.0)
+    waited = time.monotonic() - t0
+    outcome["after_address_screen"] = screen
+    outcome["after_address_wait_s"] = round(waited, 1)
+    markers.mark("after_address_loaded", screen=screen[:60], waited_s=round(waited, 1))
+    if screen == "unknown":
+        print(f"  still loading after {waited:.0f}s — stopping the recording anyway")
+    else:
+        print(f"  loaded after {waited:.0f}s: {screen[:60]!r} — holding {_RECORDING_TAIL_HOLD:.0f}s for the video")
+    time.sleep(_RECORDING_TAIL_HOLD)
 
 
 def run_test_case_7_2(
@@ -2191,6 +2487,10 @@ def run_test_case_7_2(
         else:
             _add_basket_produce_or_search(driver, markers, outcome, sample=sample)
         _open_cart_page(driver, markers, outcome)
+        if sample.letter in CART_QTY_BASKETS and sample.units_each > 1 and not batch_g:
+            # Lines that can't reach ×units_each (low stock) → swap them out
+            # before recording, so the Cart raise can be exact.
+            _replace_low_stock_lines(driver, markers, outcome, sample=sample)
         # Ground truth before recording: "Proceed to checkout (N items)" is
         # what actually goes to checkout (the tab badge can also count items
         # outside this checkout). Fall back to the badge delta.
@@ -2267,14 +2567,30 @@ def run_test_case_7_2(
             num_items=sample.num_items,
         )
 
-        _tc6_checkout_edits(driver, markers, outcome)
-        if not cart_qty and not batch_g:
+        pyo_raise = not cart_qty and not batch_g and sample.units_each > 1
+        if pyo_raise:
+            # Raise on Place Your Order before the address change: the 2nd
+            # address can make items unshippable (19 Oct 2026: "can't be
+            # shipped to the address you selected"), and Place Your Order is
+            # then replaced by "Make updates to your items".
+            def _raise_before_address() -> None:
+                outcome["pyo_raised_before_address"] = True
+                _raise_qty_on_place_order(driver, markers, outcome, sample=sample)
+            outcome["_before_address_hook"] = _raise_before_address
+        try:
+            _tc6_checkout_edits(driver, markers, outcome)
+        finally:
+            outcome.pop("_before_address_hook", None)  # never written to JSON
+        if pyo_raise and not outcome.get("pyo_raised_before_address"):
+            # Address was handled first (address-first checkout): raise now.
             _raise_qty_on_place_order(driver, markers, outcome, sample=sample)
         if sample.units_each <= 1 or batch_g:
             # ×1 baskets have no qty step — exact = the Cart's checkout count.
             outcome["basket_exact"] = bool(outcome.get("cart_items_exact"))
 
-        time.sleep(0.2)
+        # Keep recording until the screen after "Deliver to this address" has
+        # loaded — videos used to end on the loading spinner (19 Oct 2026).
+        _wait_after_address_change(driver, markers, outcome)
         markers.mark(
             "test_case_7_2_stopped_after_address",
             sample=sample.letter,
@@ -2300,7 +2616,12 @@ def run_test_case_7_2(
         )
         if outcome.get("payment_change_skipped"):
             outcome["message"] = outcome["message"].replace(
-                "2nd payment → Continue", "payment change SKIPPED (no 2nd card)"
+                "2nd payment → Continue", "payment change SKIPPED"
+            )
+        if outcome.get("see_more_delivery_slots_missing"):
+            outcome["message"] = outcome["message"].replace(
+                "See more slots → last slot",
+                "no See more link → last listed slot",
             )
         print(outcome["message"])
         return outcome

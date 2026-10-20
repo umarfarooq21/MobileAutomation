@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+import re
 import sys
 from contextlib import nullcontext
 from datetime import datetime
@@ -93,7 +95,43 @@ def run_cmd(
         else _RunLog(settings.artifacts_dir, retailer, scenario, basket_size)
     )
     with log_ctx:
-        _run_scenario(settings, retailer, scenario, dry_run, basket_size)
+        outcome = _run_scenario(settings, retailer, scenario, dry_run, basket_size)
+    if not dry_run and outcome:
+        _copy_to_submission(settings, retailer, scenario, basket_size, outcome,
+                            getattr(log_ctx, "path", None))
+    if (outcome or {}).get("status") == "error":
+        raise SystemExit(1)
+
+
+_SUBMISSION_SCENARIOS = {
+    # scenario → retailer folder under artifacts/Submission/
+    "test_case_7_2": "Amazon",
+    "test_case_amazon_final": "Amazon",
+}
+
+
+def _copy_to_submission(settings, retailer, scenario, basket, outcome, log_path) -> None:
+    """Exact passes → artifacts/Submission/<Retailer>/Basket <X>/ (video
+    only). The dated folders keep every run and its log; Submission holds
+    only the videos to hand in."""
+    import shutil
+    from pathlib import Path
+
+    folder_name = _SUBMISSION_SCENARIOS.get(scenario.lower())
+    if not folder_name or not basket:
+        return
+    if outcome.get("status") != "ok" or outcome.get("basket_exact") is not True:
+        print(f"Submission: not copied (status={outcome.get('status')}, "
+              f"exact={outcome.get('basket_exact')})")
+        return
+    dest = Path(settings.artifacts_dir).parent / "Submission" / folder_name / f"Basket {basket.upper()}"
+    dest.mkdir(parents=True, exist_ok=True)
+    copied = []
+    for src in (outcome.get("video"),):  # videos only — logs stay in the dated folders
+        if src and Path(src).exists():
+            shutil.copy2(src, dest / Path(src).name)
+            copied.append(Path(src).name)
+    print(f"Submission: copied {copied} → {dest}")
 
 
 class _Tee:
@@ -210,6 +248,15 @@ def _run_scenario(
             dry_run=dry_run,
             basket_size=basket_size,
         )
+    elif re.fullmatch(r"basket_[a-h]|test_case_[a-h]_instacart", scenario):
+        # Instacart baskets (grocery_latency/scenarios/basket_X.py), loaded on
+        # demand so one broken basket file can't stop the CLI. (scenario is
+        # lower-cased above; the files use an upper-case letter.)
+        letter = (scenario[7] if scenario.startswith("basket_") else scenario[10]).upper()
+        module = importlib.import_module(f"grocery_latency.scenarios.basket_{letter}")
+        outcome = getattr(module, f"run_basket_{letter}")(
+            settings, retailer, bundle_id, dry_run=dry_run
+        )
     elif scenario in ("test_case_walmart_6", "test_case_wallmart_final"):
         outcome = run_test_case_walmart_6(
             settings,
@@ -229,8 +276,7 @@ def _run_scenario(
     else:
         raise click.ClickException(f"Unsupported scenario: {scenario}")
 
-    if outcome.get("status") == "error":
-        raise SystemExit(1)
+    return outcome
 
 
 if __name__ == "__main__":

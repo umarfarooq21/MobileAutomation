@@ -1355,46 +1355,172 @@ def _handle_address_screen(driver, markers: MarkerLog, outcome: dict) -> None:
         time.sleep(0.5)
 
 
-def _open_payment_from_place_order(driver, markers: MarkerLog, outcome: dict) -> bool:
-    """From Place Your Order, open Change payment method if present (hard ~5s budget)."""
-    print('Step: tap "Change payment method" (if on Place Your Order) …')
-    strategies = (
-        (AppiumBy.ACCESSIBILITY_ID, "Change payment method"),
-        (
-            AppiumBy.IOS_CLASS_CHAIN,
-            '**/XCUIElementTypeStaticText[`label == "Change payment method"`]',
-        ),
-        (
-            AppiumBy.IOS_CLASS_CHAIN,
-            '**/XCUIElementTypeLink[`label == "Change payment method"`]',
-        ),
-    )
-    deadline = time.monotonic() + 5.0
-    scroll_i = 0
-    while time.monotonic() < deadline:
+def _tap_point(driver, x: float, y: float) -> None:
+    """Plain coordinate tap (no element lookup)."""
+    driver.execute_script("mobile: tap", {"x": int(round(x)), "y": int(round(y))})
+
+
+_CHANGE_PAY_LABEL = "Change payment method"
+_PLACE_ORDER_CLEARANCE_PT = 90  # same clearance as the Place Your Order qty raise
+_CHANGE_PAY_MAX_TAPS = 2
+
+
+def _change_pay_rects(driver) -> list[tuple[float, float, float, float]]:
+    """(x, y, w, h) of every "Change payment method" link the page reports."""
+    out: list[tuple[float, float, float, float]] = []
+    try:
+        els = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            f'label == "{_CHANGE_PAY_LABEL}" OR name == "{_CHANGE_PAY_LABEL}"',
+        )
+    except Exception:  # noqa: BLE001
+        return out
+    for el in els[:6]:
         try:
-            el, by, value = find_first(driver, strategies, timeout=0.55)
-            el.click()
-            markers.mark("change_payment_tapped", by=by, value=value)
-            _mark_step(outcome, "change_payment", status="ok", by=by, value=value)
-            outcome["change_payment_tapped"] = True
-            print(f"  Change payment: {by} = {value!r}")
-            time.sleep(0.4)
-            return True
-        except TimeoutError:
-            _scroll_down(driver, percent=0.45)
-            scroll_i += 1
-            time.sleep(0.08)
+            r = el.rect or {}
+            box = (float(r.get("x", 0)), float(r.get("y", 0)),
+                   float(r.get("width", 0)), float(r.get("height", 0)))
         except Exception:  # noqa: BLE001
+            continue
+        if box[2] > 0 and not any(abs(box[1] - o[1]) < 6 for o in out):
+            out.append(box)
+    out.sort(key=lambda b: b[1])
+    return out
+
+
+def _place_order_button_ys(driver) -> list[float]:
+    try:
+        els = driver.find_elements(
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND '
+            '(label ==[c] "Place your order" OR name ==[c] "Place your order")',
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    ys = []
+    for el in els[:4]:
+        try:
+            r = el.rect or {}
+            ys.append(float(r.get("y", 0)) + float(r.get("height", 0)) / 2.0)
+        except Exception:  # noqa: BLE001
+            continue
+    return ys
+
+
+def _screen_confirms_link(driver, cx: float, cy: float, w: float):
+    """Live-screenshot check at the tap point → (ok, reason).
+
+    ok only if blue link text is really drawn there (the page's reported
+    position is fresh) and no yellow "Place your order" button is drawn
+    within the clearance band above/below it."""
+    try:
+        import io as _io
+
+        from PIL import Image as _Image
+
+        png = driver.get_screenshot_as_png()
+        img = _Image.open(_io.BytesIO(png)).convert("RGB")
+        win_w = float((driver.get_window_size() or {}).get("width") or 390)
+        k = img.size[0] / win_w
+    except Exception as exc:  # noqa: BLE001
+        return False, f"screenshot failed: {exc}"
+    W, H = img.size
+
+    def _count(x0, y0, x1, y1, test) -> int:
+        n = 0
+        for yy in range(max(0, int(y0 * k)), min(H, int(y1 * k)), 3):
+            for xx in range(max(0, int(x0 * k)), min(W, int(x1 * k)), 3):
+                if test(img.getpixel((xx, yy))):
+                    n += 1
+        return n
+
+    def blue(p):
+        r, g, b = p
+        return b > 120 and r < 110 and (b - r) > 60
+
+    def yellow(p):
+        r, g, b = p
+        return r > 225 and g > 180 and b < 110
+
+    if _count(cx - w / 2, cy - 8, cx + w / 2, cy + 8, blue) < 6:
+        return False, "no link text drawn at the reported position (stale)"
+    band = _PLACE_ORDER_CLEARANCE_PT
+    if _count(10, cy - band, win_w - 10, cy + band, yellow) > 25:
+        return False, "Place your order button within clearance"
+    return True, ""
+
+
+def _open_payment_from_place_order(driver, markers: MarkerLog, outcome: dict) -> bool:
+    """From Place Your Order, open Change payment method — only by a
+    coordinate tap at a position confirmed fresh (stable across two reads,
+    link text visible in a live screenshot) and at least
+    _PLACE_ORDER_CLEARANCE_PT away from "Place your order" (page-reported
+    AND on screen). On big pages the tree's positions can be stale and
+    el.click() tapped elsewhere (19 Oct 2026, basket F looped 8×)."""
+    print('Step: tap "Change payment method" (if on Place Your Order) …')
+    taps = int(outcome.get("change_payment_taps") or 0)
+    if taps >= _CHANGE_PAY_MAX_TAPS:
+        print(f"  payment page did not open after {taps} tap(s) — skipping payment change")
+        _mark_step(outcome, "change_payment", status="skipped",
+                   reason="payment page did not open after safe taps")
+        outcome["payment_change_skipped"] = "payment page did not open"
+        markers.mark("change_payment_skipped", reason="max_taps")
+        return False
+    try:
+        h = float((driver.get_window_size() or {}).get("height") or 844)
+    except Exception:  # noqa: BLE001
+        h = 844.0
+    deadline = time.monotonic() + 10.0
+    reason = "link not found"
+    while time.monotonic() < deadline:
+        first = _change_pay_rects(driver)
+        time.sleep(0.6)
+        second = _change_pay_rects(driver)
+        pick = None
+        for b in second:
+            cy = b[1] + b[3] / 2.0
+            if not (120 <= cy <= h * 0.85):
+                continue
+            # Fresh 1: the same position on two separate reads.
+            if not any(abs(b[1] - a[1]) <= 3 and abs(b[0] - a[0]) <= 3 for a in first):
+                reason = "position not stable"
+                continue
+            pick = b
             break
-    _mark_step(
-        outcome,
-        "change_payment",
-        status="skipped",
-        reason="Change payment not on Place Your Order",
-    )
-    markers.mark("change_payment_skipped", scrolls=scroll_i)
-    print("  Change payment not found — skipping")
+        if pick is None:
+            if not second:
+                reason = "link not found"
+            _scroll_down(driver, percent=0.30)
+            time.sleep(0.5)
+            continue
+        x, y, w, hh = pick
+        cx, cy = x + min(w, 200.0) / 2.0, y + hh / 2.0
+        # Clearance 1: page-reported "Place your order" buttons.
+        if any(abs(cy - py) < _PLACE_ORDER_CLEARANCE_PT for py in _place_order_button_ys(driver)):
+            reason = "too close to Place your order (page)"
+            _scroll_down(driver, percent=0.25)
+            time.sleep(0.5)
+            continue
+        # Fresh 2 + clearance 2: what is actually drawn on screen.
+        ok, why = _screen_confirms_link(driver, cx, cy, min(w, 200.0))
+        if not ok:
+            reason = why
+            if "clearance" in why:
+                _scroll_down(driver, percent=0.25)
+            time.sleep(0.6)
+            continue
+        _tap_point(driver, cx, cy)
+        outcome["change_payment_taps"] = taps + 1
+        markers.mark("change_payment_tapped", via="confirmed_coordinate", x=cx, y=cy)
+        _mark_step(outcome, "change_payment", status="ok", via="confirmed_coordinate")
+        outcome["change_payment_tapped"] = True
+        print(f"  Change payment: confirmed tap @ ({cx:.0f},{cy:.0f}) — fresh + clear of Place your order")
+        time.sleep(0.6)
+        return True
+    _mark_step(outcome, "change_payment", status="skipped", reason=reason)
+    markers.mark("change_payment_skipped", reason=reason[:80])
+    outcome["payment_change_skipped"] = reason
+    print(f"  Change payment not tapped — {reason}; skipping (no unsafe tap)")
     return False
 
 

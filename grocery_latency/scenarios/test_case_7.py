@@ -395,7 +395,7 @@ def run_test_case_7(
         )
         if outcome.get("payment_change_skipped"):
             outcome["message"] = outcome["message"].replace(
-                "2nd payment → Continue", "payment change SKIPPED (no 2nd card)"
+                "2nd payment → Continue", "payment change SKIPPED"
             )
         print(outcome["message"])
         return outcome

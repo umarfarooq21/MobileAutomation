@@ -417,6 +417,40 @@ def _tap_grocery_outlet_below_offers(
     """Home: find Offers landmark, then tap Grocery Outlet icon in the row below."""
     print('Step: on home, tap Grocery Outlet icon below "Offers" …')
 
+    # A cold start can reopen Instacart inside the last store (seen 16 Oct
+    # 2026: Grocery Outlet page, scrolled) — there is no Offers row there.
+    # Back out to home first.
+    for _ in range(3):
+        try:
+            in_store = driver.find_elements(
+                AppiumBy.IOS_PREDICATE,
+                'label BEGINSWITH[c] "Search Grocery Outlet" OR '
+                'value BEGINSWITH[c] "Search Grocery Outlet"',
+            )
+        except Exception:  # noqa: BLE001
+            in_store = []
+        if not in_store:
+            break
+        print("  app reopened inside Grocery Outlet — going back to home …")
+        markers.mark("reopened_in_store_back_to_home")
+        went_back = False
+        for lab in ("Back", "back", "Go back"):
+            try:
+                for el in driver.find_elements(
+                    AppiumBy.IOS_PREDICATE,
+                    f'type == "XCUIElementTypeButton" AND (label == "{lab}" OR name == "{lab}")',
+                )[:1]:
+                    el.click()
+                    went_back = True
+            except Exception:  # noqa: BLE001
+                pass
+            if went_back:
+                break
+        if not went_back:
+            # Header back arrow (top-left of the red store header).
+            driver.execute_script("mobile: tap", {"x": 36, "y": 75})
+        time.sleep(2.0)
+
     offers_bottom = None
     for attempt in range(8):
         offers_bottom = _offers_y(driver)
@@ -631,7 +665,9 @@ def _parse_basket_bar_label(label: str) -> tuple[str, int | None]:
     Returns ("empty", None) | ("count", n) | ("unknown", None).
     """
     head = (label or "").split(",", 1)[0].strip()
-    if head.lower() == "basket":
+    # Instacart renamed the bar "Basket" → "Cart" (e.g. "Cart, Get $15 off
+    # $100", seen 16 Oct 2026); both mean empty.
+    if head.lower() in ("basket", "cart"):
         return "empty", None
     if re.fullmatch(r"\d{1,3}", head):
         return "count", int(head)
